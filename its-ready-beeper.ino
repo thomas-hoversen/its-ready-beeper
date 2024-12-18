@@ -4,7 +4,7 @@
 #include <arduinoFFT.h>
 #include "esp_task_wdt.h"  // Watchdog Timer Reset
 
-// Configuration
+// Configuration Constants
 #define MIC_PIN 35                 // Analog pin connected to MAX9814 output
 #define LED_PIN 2                  // Onboard LED pin
 #define SAMPLES 64                 // Number of samples for FFT (must be power of 2)
@@ -12,34 +12,45 @@
 #define FREQUENCY_MIN 2500         // Minimum frequency of the beep (in Hz)
 #define FREQUENCY_MAX 3500         // Maximum frequency of the beep (in Hz)
 
-int SILENCE_THRESHOLD = 100;       // Noise floor level in a quiet room
-float AMPLITUDE_THRESHOLD = 500;   // Minimum amplitude for a loud beep
-float BIN_AMPLITUDE_THRESHOLD = 50; // Minimum amplitude per frequency bin
-#define MULTI_WINDOW_CONFIDENCE 5  // Number of consecutive windows for confirmation
-#define DETECTION_DELAY 1500       // Minimum time between detections (in ms)
-#define LED_FLASH_DURATION 500     // LED flash duration in milliseconds
+const int SILENCE_THRESHOLD = 100;          // Noise floor level in a quiet room
+float AMPLITUDE_THRESHOLD = 500;            // Minimum amplitude for a loud beep
+const float BIN_AMPLITUDE_THRESHOLD = 50;   // Minimum amplitude per frequency bin
+const int MULTI_WINDOW_CONFIDENCE = 5;      // Consecutive windows for confirmation
+const int DETECTION_DELAY = 1000;           // Time between detections (in ms)
+const int LED_FLASH_DURATION = 500;         // LED flash duration in milliseconds
 
-// Buffers
+// Delay before attempting playback after detection (in ms)
+const unsigned long PLAYBACK_DELAY = 3000;  
+
+// Global Variables
 float vReal[SAMPLES];
 float vImag[SAMPLES];
 unsigned long lastDetectionTime = 0;
-unsigned long ledFlashStartTime = 0;
 int confirmedWindows = 0;
-int beepCount = 0;
+bool playingAudio = false;
 
-// Bluetooth and Audio
+// When a beep is detected, we set a timer for playback attempt
+bool pendingPlayback = false;
+unsigned long beepDetectionTime = 0;
+
 BluetoothA2DPSource a2dp_source;
-File audioFile;
 const char* bluetoothSpeakerName = "C17A";
 const char* audioFilePath = "/audio1.wav";
+File audioFile;
 
-// FFT Object
 ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, SAMPLES, SAMPLING_FREQUENCY);
+
+// Forward Declarations
+bool detectBeep();
+void flashLED(int pin, int duration);
+void attemptPlaybackAfterDelay();
+void startAudioPlayback();
 
 // Audio Data Callback Function
 int32_t audioDataCallback(uint8_t* data, int32_t len) {
     if (!audioFile || !audioFile.available()) {
-        return 0; // No data available
+        // No more data to read
+        return 0;
     }
     size_t bytesRead = audioFile.read(data, len);
     return static_cast<int32_t>(bytesRead);
@@ -51,12 +62,22 @@ void setup() {
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
 
+    // Initialize Watchdog Timer
+    esp_task_wdt_config_t wdt_config = {
+        .timeout_ms = 10000,
+        .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
+        .trigger_panic = true,
+    };
+    esp_task_wdt_init(&wdt_config);
+    esp_task_wdt_add(NULL);
+
     // Initialize SPIFFS
     if (!SPIFFS.begin(true)) {
         Serial.println("SPIFFS failed to mount!");
         while (1);
     }
 
+    // List files in SPIFFS
     Serial.println("Checking files in SPIFFS...");
     File root = SPIFFS.open("/");
     File file = root.openNextFile();
@@ -65,106 +86,14 @@ void setup() {
         Serial.println(file.name());
         file = root.openNextFile();
     }
-    Serial.println("SPIFFS initialized.");
 
-    // Open audio file
-    audioFile = SPIFFS.open(audioFilePath, "r");
-    if (!audioFile) {
-        Serial.println("Failed to open audio file!");
-    }
+    // No need to open audioFile here; we'll open it fresh on each playback attempt
 
-    // Start Bluetooth A2DP with raw data callback
+    // Start Bluetooth A2DP with raw callback
     a2dp_source.start_raw(bluetoothSpeakerName, audioDataCallback);
     Serial.println("Bluetooth A2DP source started. Ready to connect to a speaker.");
 
-    Serial.println("Calibrating baseline noise level...");
-    calibrateBaseline();
-    Serial.println("Listening for appliance beeps...");
-
-    // Initialize Watchdog Timer with a 10-second timeout
-    esp_task_wdt_config_t wdt_config = {
-        .timeout_ms = 10000,
-        .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
-        .trigger_panic = true,
-    };
-    esp_task_wdt_init(&wdt_config);
-    esp_task_wdt_add(NULL);  // Add current thread to WDT watch
-}
-
-void loop() {
-    // Collect audio samples
-    for (uint16_t i = 0; i < SAMPLES; i++) {
-        vReal[i] = analogRead(MIC_PIN) - 2048; // Center the signal
-        vImag[i] = 0;
-        delayMicroseconds(1000000 / SAMPLING_FREQUENCY);
-        esp_task_wdt_reset();  // Reset WDT to prevent timeout
-    }
-
-    FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
-    FFT.compute(FFTDirection::Forward);
-    FFT.complexToMagnitude();
-
-    if (detectBeep()) {
-        confirmedWindows++;
-    } else {
-        confirmedWindows = 0;
-    }
-
-    if (confirmedWindows >= MULTI_WINDOW_CONFIDENCE) {
-        unsigned long currentTime = millis();
-        if (currentTime - lastDetectionTime >= DETECTION_DELAY) {
-            beepCount++;
-            Serial.print("IT'S READY! Total beeps: ");
-            Serial.println(beepCount);
-
-            // Flash LED
-            digitalWrite(LED_PIN, HIGH);
-            ledFlashStartTime = currentTime;
-
-            // Play audio file
-            playAudioFile();
-
-            lastDetectionTime = currentTime;
-            confirmedWindows = 0;
-        }
-    }
-
-    // Turn off LED after flash duration
-    if (ledFlashStartTime > 0 && millis() - ledFlashStartTime >= LED_FLASH_DURATION) {
-        digitalWrite(LED_PIN, LOW);
-        ledFlashStartTime = 0;
-    }
-}
-
-// Play audio file function
-void playAudioFile() {
-    Serial.println("Playing audio file...");
-    if (!audioFile || !audioFile.available()) {
-        Serial.println("Audio file is not available.");
-        return;
-    }
-
-    // Wait for Bluetooth to connect
-    while (!a2dp_source.is_connected()) {
-        Serial.println("Waiting for Bluetooth connection...");
-        esp_task_wdt_reset();
-        delay(500);
-    }
-
-    // Restart the audio file for playback
-    audioFile.seek(0);
-    uint8_t* buffer = (uint8_t*)malloc(512);  // Allocate buffer for audio
-    while (audioFile.available() && a2dp_source.is_connected()) {
-        size_t bytesRead = audioFile.read(buffer, 512);
-        esp_task_wdt_reset();
-        delay(1);  // Allow time for audio to stream
-    }
-    free(buffer);  // Free buffer memory
-    Serial.println("Audio playback complete.");
-}
-
-// Calibrate baseline noise
-void calibrateBaseline() {
+    // Calibrate baseline noise
     long sum = 0;
     for (int i = 0; i < 100; i++) {
         sum += analogRead(MIC_PIN);
@@ -174,19 +103,119 @@ void calibrateBaseline() {
     int baseline = sum / 100;
     Serial.print("Baseline noise level: ");
     Serial.println(baseline);
-
     if (baseline > SILENCE_THRESHOLD) {
         AMPLITUDE_THRESHOLD += baseline - SILENCE_THRESHOLD;
     }
+
+    Serial.println("Listening for appliance beeps...");
 }
 
-// Beep detection function
+void loop() {
+    // If we were playing audio and now it's done, print completion message and reset
+    if (playingAudio && (!audioFile || !audioFile.available())) {
+        Serial.println("Audio playback complete.");
+        playingAudio = false;
+        // Close the file after playback is done
+        if (audioFile) {
+            audioFile.close();
+        }
+    }
+
+    // If we have a pending playback (a beep was detected recently) and the delay has passed, attempt playback
+    if (pendingPlayback && (millis() - beepDetectionTime >= PLAYBACK_DELAY)) {
+        attemptPlaybackAfterDelay();
+    }
+
+    // Collect audio samples
+    for (int i = 0; i < SAMPLES; i++) {
+        vReal[i] = analogRead(MIC_PIN) - 2048;
+        vImag[i] = 0;
+        delayMicroseconds(1000000 / SAMPLING_FREQUENCY);
+        esp_task_wdt_reset();
+    }
+
+    // Perform FFT
+    FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
+    FFT.compute(FFTDirection::Forward);
+    FFT.complexToMagnitude();
+
+    // Check for beep detection
+    if (detectBeep()) {
+        confirmedWindows++;
+    } else {
+        confirmedWindows = 0;
+    }
+
+    if (confirmedWindows >= MULTI_WINDOW_CONFIDENCE) {
+        unsigned long currentTime = millis();
+        if (currentTime - lastDetectionTime >= DETECTION_DELAY) {
+            Serial.println("Beep detected!");
+
+            // Reset windows
+            confirmedWindows = 0;
+            lastDetectionTime = currentTime;
+
+            // Flash LED immediately
+            flashLED(LED_PIN, LED_FLASH_DURATION);
+
+            // Schedule playback attempt after the 3-second delay
+            beepDetectionTime = millis();
+            pendingPlayback = true;
+        }
+    }
+}
+
+// This function is called after the 3-second delay has passed since the beep detection
+void attemptPlaybackAfterDelay() {
+    pendingPlayback = false;  // Reset pending playback flag
+    Serial.println("Attempting to play audio after delay...");
+
+    startAudioPlayback();
+}
+
+void startAudioPlayback() {
+    if (!a2dp_source.is_connected()) {
+        Serial.println("No Bluetooth connection. Skipping audio playback.");
+        return;
+    }
+
+    // Always re-open the audio file fresh before playback
+    if (audioFile) {
+        audioFile.close();
+    }
+    audioFile = SPIFFS.open(audioFilePath, "r");
+    if (!audioFile || !audioFile.available()) {
+        Serial.println("Audio file is not available.");
+        return;
+    }
+
+    // Restart from the beginning of the file
+    bool seekSuccess = audioFile.seek(0, SeekSet);
+    if (!seekSuccess) {
+        Serial.println("Failed to seek audio file to start.");
+        return;
+    }
+
+    Serial.println("Playing audio file...");
+    playingAudio = true;
+    // The actual data transfer happens in the callback.
+}
+
+// Flash LED to indicate beep detection
+void flashLED(int pin, int duration) {
+    digitalWrite(pin, HIGH);
+    delay(duration);
+    digitalWrite(pin, LOW);
+}
+
+// Detect beep using majorPeak and amplitude thresholds
 bool detectBeep() {
     float majorFrequency = FFT.majorPeak();
     float amplitude = 0.0;
     bool sufficientBins = false;
 
-    for (uint16_t i = 0; i < SAMPLES / 2; i++) {
+    // Sum amplitudes and check if bins exceed threshold
+    for (int i = 0; i < SAMPLES / 2; i++) {
         float frequency = (i * SAMPLING_FREQUENCY) / SAMPLES;
         if (frequency >= FREQUENCY_MIN && frequency <= FREQUENCY_MAX) {
             amplitude += vReal[i];
