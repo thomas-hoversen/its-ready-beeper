@@ -19,19 +19,12 @@ const int MULTI_WINDOW_CONFIDENCE = 5;      // Consecutive windows for confirmat
 const int DETECTION_DELAY = 1000;           // Time between detections (in ms)
 const int LED_FLASH_DURATION = 500;         // LED flash duration in milliseconds
 
-// Delay before attempting playback after detection (in ms)
-const unsigned long PLAYBACK_DELAY = 3000;  
-
 // Global Variables
 float vReal[SAMPLES];
 float vImag[SAMPLES];
 unsigned long lastDetectionTime = 0;
 int confirmedWindows = 0;
 bool playingAudio = false;
-
-// When a beep is detected, we set a timer for playback attempt
-bool pendingPlayback = false;
-unsigned long beepDetectionTime = 0;
 
 BluetoothA2DPSource a2dp_source;
 const char* bluetoothSpeakerName = "C17A";
@@ -43,7 +36,6 @@ ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, SAMPLES, SAMPLING_FREQUE
 // Forward Declarations
 bool detectBeep();
 void flashLED(int pin, int duration);
-void attemptPlaybackAfterDelay();
 void startAudioPlayback();
 
 // Audio Data Callback Function
@@ -87,8 +79,6 @@ void setup() {
         file = root.openNextFile();
     }
 
-    // No need to open audioFile here; we'll open it fresh on each playback attempt
-
     // Start Bluetooth A2DP with raw callback
     a2dp_source.start_raw(bluetoothSpeakerName, audioDataCallback);
     Serial.println("Bluetooth A2DP source started. Ready to connect to a speaker.");
@@ -119,11 +109,6 @@ void loop() {
         if (audioFile) {
             audioFile.close();
         }
-    }
-
-    // If we have a pending playback (a beep was detected recently) and the delay has passed, attempt playback
-    if (pendingPlayback && (millis() - beepDetectionTime >= PLAYBACK_DELAY)) {
-        attemptPlaybackAfterDelay();
     }
 
     // Collect audio samples
@@ -158,19 +143,10 @@ void loop() {
             // Flash LED immediately
             flashLED(LED_PIN, LED_FLASH_DURATION);
 
-            // Schedule playback attempt after the 3-second delay
-            beepDetectionTime = millis();
-            pendingPlayback = true;
+            // Attempt immediate audio playback
+            startAudioPlayback();
         }
     }
-}
-
-// This function is called after the 3-second delay has passed since the beep detection
-void attemptPlaybackAfterDelay() {
-    pendingPlayback = false;  // Reset pending playback flag
-    Serial.println("Attempting to play audio after delay...");
-
-    startAudioPlayback();
 }
 
 void startAudioPlayback() {
