@@ -1,17 +1,20 @@
 # its-ready-beeper
 
-## Upload the `.wav` File to the ESP32 Board
+## Upload Code and Files to the ESP32 Board
 
-Follow these steps to upload the `.wav` file to your ESP32 using `mkspiffs` and `esptool`.
+Follow these steps to **clear the flash**, upload the SPIFFS image (your `.wav` file), and upload the Arduino code.
 
 ---
 
-### 1. Install `esptool` (Python Tool)
-
-Ensure Python and `pip` are installed, then run:
-```bash
-pip3 install esptool
-```
+### 1. Install Required Tools
+Make sure the following tools are installed:
+- **esptool**: To flash the ESP32.  
+   Install it using:
+   ```bash
+   pip3 install esptool
+   ```
+- **mkspiffs**: To create the SPIFFS image.  
+   Follow the steps below to install it.
 
 ---
 
@@ -24,67 +27,111 @@ pip3 install esptool
 2. Download the appropriate release for **macOS**:  
    - `mkspiffs-0.2.3-arduino-esp32-osx.tar.gz`
 
----
-
-#### Step 2: Extract the File
-From your `Downloads` directory, extract the file:
+#### Step 2: Extract the File and Move It
+Extract the file and place it in your project directory:
 ```bash
 cd ~/Downloads
 tar -xzf mkspiffs-0.2.3-arduino-esp32-osx.tar.gz
+mv mkspiffs-0.2.3-arduino-esp32-osx ~/Desktop/git_projects/its-ready/its-ready-beeper/mkspiffs
+chmod +x ~/Desktop/git_projects/its-ready/its-ready-beeper/mkspiffs
 ```
 
 ---
 
-#### Step 3: Move `mkspiffs` to the Project Directory
-Move the extracted `mkspiffs` executable into your project folder:
+### 3. Generate and Upload the SPIFFS Image
+
+#### Step 1: Place Your `.wav` File
+Place your `.wav` file in a folder named `data` inside your project directory:
+```
+~/Desktop/git_projects/its-ready/its-ready-beeper/data/audio1.wav
+```
+
+#### Step 2: Generate the SPIFFS Image
+Run this command to create the SPIFFS image:
 ```bash
-mv mkspiffs-0.2.3-arduino-esp32-osx ~/Desktop/git_projects/its-ready/its-ready-beeper/
+cd ~/Desktop/git_projects/its-ready/its-ready-beeper
+./mkspiffs -c ./data -b 4096 -p 256 -s 983040 spiffs.bin
 ```
+- `-s 983040`: Sets the SPIFFS size to **960KB**.
 
----
-
-#### Step 4: Rename and Make It Executable
-Rename the file for convenience and set executable permissions:
+#### Step 3: Clear ESP32 Flash Memory
+Erase all previous data on the ESP32:
 ```bash
-cd ~/Desktop/git_projects/its-ready/its-ready-beeper/
-mv mkspiffs-0.2.3-arduino-esp32-osx mkspiffs
-chmod +x mkspiffs
+esptool.py --chip esp32 --port /dev/cu.usbserial-0001 erase_flash
 ```
 
----
-
-#### Step 5: Verify the Installation
-Run the following command to ensure `mkspiffs` works:
+#### Step 4: Upload the SPIFFS Image to the ESP32
+Flash the generated `spiffs.bin` file to the ESP32 at the specified offset:
 ```bash
-./mkspiffs --version
+esptool.py --chip esp32 --port /dev/cu.usbserial-0001 write_flash 0x290000 spiffs.bin
 ```
 
 ---
 
-### 3. Prepare the SPIFFS Image
+### 4. Upload Arduino Code to ESP32
 
-1. Place your `.wav` file inside a folder named `data` in your project directory:
-   ```
-   ~/Desktop/git_projects/its-ready/its-ready-beeper/data/your-audio.wav
-   ```
+#### Step 1: Compile the Code
+Use `arduino-cli` to compile your sketch with the custom partition scheme:
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32 --build-property "build.partitions=partitions.csv" .
+```
 
-2. Generate the SPIFFS image:
+#### Step 2: Upload the Code
+Upload the compiled code to the ESP32:
+```bash
+arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/cu.usbserial-0001
+```
+
+---
+
+### 5. Verify the Process
+1. Open the **Serial Monitor** at **115200 baud** to check logs:
    ```bash
-   ./mkspiffs -c ./data -b 4096 -p 256 -s 1507328 spiffs.bin
+   screen /dev/cu.usbserial-0001 115200
+   ```
+2. Verify that:
+   - SPIFFS is initialized and the file list shows `audio1.wav`.
+   - The ESP32 connects to the Bluetooth speaker.
+   - The audio file plays correctly when a beep is detected.
+
+---
+
+## Install Tools for the First Time
+
+### Install `esptool` and `arduino-cli`
+Run the following commands to install the required tools:
+```bash
+pip3 install esptool
+brew install arduino-cli
+```
+
+### Set Up the `arduino-cli`
+1. Add the ESP32 board platform:
+   ```bash
+   arduino-cli core update-index
+   arduino-cli core install esp32:esp32
+   ```
+2. Verify the setup:
+   ```bash
+   arduino-cli board list
    ```
 
 ---
 
-### 4. Upload the SPIFFS Image to the ESP32
-
-Use `esptool` to upload the SPIFFS image:
-```bash
-esptool.py --chip esp32 --port /dev/cu.usbserial-0001 --baud 921600 write_flash 0x291000 spiffs.bin
-```
-- Replace `/dev/cu.usbserial-0001` with the correct port for your ESP32.
-- Adjust the address `0x291000` if you're using a custom partition scheme.
+### Notes:
+- If the file upload fails, verify the SPIFFS address (`0x290000`) matches the `partitions.csv` file:
+   ```csv
+   # Name,   Type, SubType, Offset,   Size,      Flags
+   nvs,      data, nvs,     0x9000,   0x5000,
+   otadata,  data, ota,     0xe000,   0x2000,
+   app0,     app,  ota_0,   0x10000,  0x140000,
+   app1,     app,  ota_1,   0x150000, 0x140000,
+   spiffs,   data, spiffs,  0x290000, 0xF0000   # SPIFFS set to 960KB
+   ```
 
 ---
 
-### 5. Verify File Upload
-After uploading, the `.wav` file will be accessible through SPIFFS on your ESP32 board.
+By following these steps, your **ESP32** will:
+1. Detect beeps using FFT.
+2. Flash the LED when a beep is confirmed.
+3. Play the `.wav` file over Bluetooth when the detection is triggered. 🎉
