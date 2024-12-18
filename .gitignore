@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Prerequisites
 *.d
 
@@ -30,3 +31,14 @@
 *.exe
 *.out
 *.app
+=======
+*.bin
+*.elf
+*.hex
+*.eep
+*.out
+*.d
+*.o
+*.log
+.DS_Store
+>>>>>>> ef6da97 (Initial code that can detect beeps (basic detection) and flash a light on the esp32 dev board)
