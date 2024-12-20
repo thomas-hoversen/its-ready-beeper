@@ -107,6 +107,8 @@ void loop() {
     if (digitalRead(BUTTON_PIN) == LOW) {
         // Button pressed, flash LED
         flashLED(LED_PIN, LED_FLASH_DURATION);
+        // Attempt immediate audio playback
+        startAudioPlayback();
     }
 
     // If we were playing audio and now it's done, print completion message and reset
