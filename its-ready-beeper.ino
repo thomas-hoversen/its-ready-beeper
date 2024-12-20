@@ -7,6 +7,7 @@
 // Configuration Constants
 #define MIC_PIN 35                 // Analog pin connected to MAX9814 output
 #define LED_PIN 2                  // Onboard LED pin
+#define BUTTON_PIN 15              // Button connected to GND and P15
 #define SAMPLES 64                 // Number of samples for FFT (must be power of 2)
 #define SAMPLING_FREQUENCY 16000   // Sampling rate in Hz
 #define FREQUENCY_MIN 2500         // Minimum frequency of the beep (in Hz)
@@ -52,6 +53,7 @@ void setup() {
     Serial.begin(115200);
     pinMode(MIC_PIN, INPUT);
     pinMode(LED_PIN, OUTPUT);
+    pinMode(BUTTON_PIN, INPUT_PULLUP); // Button uses internal pull-up
     digitalWrite(LED_PIN, LOW);
 
     // Initialize Watchdog Timer
@@ -101,6 +103,12 @@ void setup() {
 }
 
 void loop() {
+    // Check for button press
+    if (digitalRead(BUTTON_PIN) == LOW) {
+        // Button pressed, flash LED
+        flashLED(LED_PIN, LED_FLASH_DURATION);
+    }
+
     // If we were playing audio and now it's done, print completion message and reset
     if (playingAudio && (!audioFile || !audioFile.available())) {
         Serial.println("Audio playback complete.");
@@ -111,7 +119,7 @@ void loop() {
         }
     }
 
-    // Collect audio samples
+    // Collect audio samples for beep detection
     for (int i = 0; i < SAMPLES; i++) {
         vReal[i] = analogRead(MIC_PIN) - 2048;
         vImag[i] = 0;
@@ -140,7 +148,7 @@ void loop() {
             confirmedWindows = 0;
             lastDetectionTime = currentTime;
 
-            // Flash LED immediately
+            // Flash LED immediately for beep detection
             flashLED(LED_PIN, LED_FLASH_DURATION);
 
             // Attempt immediate audio playback
@@ -177,7 +185,7 @@ void startAudioPlayback() {
     // The actual data transfer happens in the callback.
 }
 
-// Flash LED to indicate beep detection
+// Flash LED to indicate detection
 void flashLED(int pin, int duration) {
     digitalWrite(pin, HIGH);
     delay(duration);
