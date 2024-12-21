@@ -1,110 +1,71 @@
 # its-ready-beeper
 
-## Upload Code and Files to the ESP32 Board
+This ESP32-based project detects a specific beep frequency and then plays an audio file (e.g., a notification sound) over a Bluetooth-connected speaker. The code utilizes FFT-based audio processing and can be easily managed with the PlatformIO ecosystem.
 
-Follow this **one-command workflow** to **clear the flash memory**, **upload the SPIFFS image**, and **upload the Arduino sketch** in one go.
+## Requirements
 
----
+- **PlatformIO**: This project assumes you are using PlatformIO (either via the VSCode extension or the PlatformIO CLI).
+- **ESP32 Development Board**: A board such as the ESP32-DevKitC.
+- **Bluetooth Speaker**: A speaker or headset to test audio playback.
+- **Audio File (WAV)**: A `.wav` file to be played when a beep is detected.
+- **ESP32FS Tool**: Used to upload the SPIFFS filesystem image. You can download `esp32fs.jar` from the [ESP32 PlatformIO File System Uploader repository](https://github.com/me-no-dev/arduino-esp32fs-plugin). Follow the instructions to integrate it into your PlatformIO environment.
 
-### 1. Install Required Tools
+## Setup Instructions
 
-Ensure these tools are installed:
-- **esptool**: Install it with:
+1. **Clone or Download the Project**  
+   Retrieve this repository and open it in VSCode with the PlatformIO extension installed, or navigate to the project directory using the PlatformIO CLI.
+
+2. **Place Your Audio File**  
+   Place your `.wav` file inside the `data` directory of the project. For example:
    ```bash
-   pip3 install esptool
+   its-ready-beeper/
+     ├─ src/
+     ├─ data/
+     │   └─ audio1.wav
+     ├─ platformio.ini
+     └─ ...
    ```
-- **mkspiffs**: To generate the SPIFFS image.
 
-   Install `mkspiffs`:
+   Ensure the file is named `audio1.wav` unless you update the code references.
+
+3. **Build and Upload the Firmware**  
+   Using PlatformIO, run the following command to compile and upload the code to your ESP32:
    ```bash
-   cd ~/Downloads
-   tar -xzf mkspiffs-0.2.3-arduino-esp32-osx.tar.gz
-   mv mkspiffs-0.2.3-arduino-esp32-osx ~/Desktop/git_projects/its-ready/its-ready-beeper/mkspiffs
-   chmod +x ~/Desktop/git_projects/its-ready/its-ready-beeper/mkspiffs
+   platformio run --target upload
    ```
 
-- **arduino-cli**: Install it with:
+   This will build and flash the main application onto your ESP32.
+
+4. **Upload the SPIFFS Filesystem Image**  
+   The audio file resides in SPIFFS (SPI Flash File System) on the ESP32. To upload it, run:
    ```bash
-   brew install arduino-cli
-   arduino-cli core update-index
-   arduino-cli core install esp32:esp32
+   platformio run --target uploadfs
    ```
 
----
+   Ensure the `esp32fs.jar` tool is correctly installed and configured to enable this step.
 
-### 2. Place Your `.wav` File
-
-Place the `.wav` file in the `data` folder:
-```
-~/Desktop/git_projects/its-ready/its-ready-beeper/data/audio1.wav
-```
-
----
-
-### 3. Clear Flash, Generate SPIFFS, and Upload Code (Single Command)
-
-Copy and paste the command below to **erase the flash**, upload the SPIFFS image, and upload the Arduino code:
-
-```bash
-cd ~/Desktop/git_projects/its-ready/its-ready-beeper && \
-esptool.py --chip esp32 --port /dev/cu.usbserial-0001 erase_flash && \
-./mkspiffs -c ./data -b 4096 -p 256 -s 983040 spiffs.bin && \
-esptool.py --chip esp32 --port /dev/cu.usbserial-0001 write_flash 0x290000 spiffs.bin && \
-arduino-cli compile --fqbn esp32:esp32:esp32 --build-property "build.partitions=partitions.csv" . && \
-arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/cu.usbserial-0001
-```
-
----
-
-### 4. Resolving Port Busy Errors
-
-If you encounter an error like:
-```
-A fatal error occurred: Could not open /dev/cu.usbserial-0001, the port is busy or doesn't exist.
-```
-
-Follow these steps to resolve it:
-
-1. Close any open **Serial Monitor** or terminal programs (e.g., `screen`) that might be using the port.
-2. Check for processes using the port:
+5. **Monitor the Serial Output**  
+   After uploading, connect to the serial monitor to view the output logs:
    ```bash
-   lsof | grep /dev/cu.usbserial-0001
+   platformio device monitor
    ```
-   - Kill the process using the port (replace `<PID>` with the process ID):
-     ```bash
-     kill -9 <PID>
-     ```
-3. Verify that the port is listed:
+   The default baud rate is typically `115200` (adjust as needed).
+
+   The logs will show whether:
+   - SPIFFS initialized correctly and `audio1.wav` is available.
+   - Bluetooth connects to the speaker.
+   - The beep detection and audio playback events occur as expected.
+
+6. **Running Unit Tests**  
+   You can run unit tests to verify the functionality of individual components. Use the following command:
    ```bash
-   ls /dev/cu.*
+   platformio test
    ```
-   Ensure `/dev/cu.usbserial-0001` appears in the output. If not:
-   - Reconnect the ESP32.
-   - Check your USB cable and port.
+   This will execute the tests defined in the `test/` directory on the development board.
 
----
+## Notes
 
-### 5. Verify Upload Success
-
-1. Connect to the Serial Monitor:
-   ```bash
-   screen /dev/cu.usbserial-0001 115200
-   ```
-2. Verify logs:
-   - SPIFFS should show `audio1.wav` as available.
-   - The Bluetooth speaker should connect successfully.
-   - The audio file plays correctly when a beep is detected.
-
----
-
-### Notes:
-
-- If you face **upload errors**, verify your **SPIFFS partition offset** matches the `partitions.csv` file:
-   ```csv
-   # Name,   Type, SubType, Offset,   Size,      Flags
-   nvs,      data, nvs,     0x9000,   0x5000,
-   otadata,  data, ota,     0xe000,   0x2000,
-   app0,     app,  ota_0,   0x10000,  0x140000,
-   app1,     app,  ota_1,   0x150000, 0x140000,
-   spiffs,   data, spiffs,  0x290000, 0xF0000   # SPIFFS size: 960KB
-   ```
+- **Adjusting Frequency Thresholds**: If your beep frequency differs, you may need to adjust `FREQUENCY_MIN`, `FREQUENCY_MAX`, and amplitude thresholds in the code.
+- **Customizing the Audio File**: Rename or change `audio1.wav` references in the code if you prefer a different filename or multiple audio files.
+- **Partitions Table**: The `partitions.csv` file defines the memory layout of the ESP32, specifying regions for code, SPIFFS, and other data. Modify this file if you need to adjust the partitioning for your project.
+- **Troubleshooting**: If the board does not appear on a serial port, check your USB cable and connection. If SPIFFS upload or code upload fails, ensure that your PlatformIO and ESP32 environment are set up correctly in `platformio.ini`.
