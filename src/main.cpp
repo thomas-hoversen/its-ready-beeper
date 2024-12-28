@@ -1,94 +1,6 @@
 /**
  * @file main.cpp
- * @brief 
- * This program continuously monitors an I2S microphone (e.g. INMP441) attached to an ESP32 
- * for specific "beep" patterns. If a beep is detected—or if a button is pressed—it triggers 
- * playback of an existing WAV file (audio1.wav) from SPIFFS to a connected Bluetooth speaker.
- *
- * --------------------------
- *        PROGRAM FLOW
- * --------------------------
- * 1) SETUP:
- *    - Initialize Serial, SPIFFS, I2S, Bluetooth, and pins (LED + button).
- *    - Print out all config variables for troubleshooting.
- *    - The system then awaits beeps or button presses.
- *
- * 2) LOOP:
- *    (a) Button Check:
- *        - If the user button is pressed, immediately trigger audio playback.
- *
- *    (b) Playback Completion:
- *        - If playback was running and the audio file has ended, mark playback complete,
- *          close the file, and impose a cooldown so we ignore new beeps briefly.
- *
- *    (c) Sample Collection:
- *        - Collect SAMPLES (e.g. 256 or 512) from the I2S mic in smaller chunks.
- *        - Keep track of the maximum sample amplitude in the time domain (for proximity checks).
- *
- *    (d) FFT:
- *        - Perform an FFT (with a Hamming window) on the collected samples to determine 
- *          frequency amplitudes.
- *
- *    (e) Beep Detection (Multi-Step):
- *        - **Consecutive Windows** (via BeepDetector):
- *           * Each beep must appear in MULTI_WINDOW_CONFIDENCE consecutive FFT windows 
- *             (helps filter short noise pulses).
- *        - **Multi-Beep History** (via BeepHistory):
- *           * Each time a beep is confirmed, we record a timestamp.
- *           * If we get THRESHOLD_COUNT beeps within TIME_WINDOW_MS (e.g. 3 beeps in 5 seconds),
- *             we trigger audio playback.
- *
- * --------------------------
- *        FEATURES
- * --------------------------
- * - I2S audio sampling from an INMP441 for beep detection (no recording is saved).
- * - Frequency domain analysis (FFT) to detect beep presence in a target frequency band.
- * - Automatic playback of an existing WAV file from SPIFFS over Bluetooth to a speaker.
- * - A button press triggers immediate playback.
- * - A watchdog timer periodically resets to avoid CPU stalls.
- * - LED feedback happens **only** when audio is about to play (not on every beep detection).
- * - Optional "closeness" check (MIC_PROXIMITY_THRESHOLD) to ignore faint or distant beeps.
- *
- * --------------------------
- *    TUNING & CONFIGURATION
- * --------------------------
- * 1) **SAMPLES** (e.g. 256, 512, 1024):
- *    - Increasing this collects more data per FFT, giving each “window” a longer time span.
- *    - Longer windows => slower detection but better resolution for sustained beeps.
- *
- * 2) **FREQUENCY_MIN / FREQUENCY_MAX**:
- *    - Adjust these if your beep is known to be in a narrower (or broader) frequency range.
- *    - For example, 1200..9000 Hz can catch a wider variety of beep pitches.
- *
- * 3) **BIN_AMPLITUDE_THRESHOLD / AMPLITUDE_THRESHOLD**:
- *    - Lowering these makes detection more lenient (detect quieter or partial beeps).
- *    - Raising them makes detection stricter (ignore smaller amplitude signals).
- *
- * 4) **MIC_PROXIMITY_THRESHOLD**:
- *    - A time-domain check to ensure the beep is “loud enough.”
- *    - If `maxSampleInFrame` is below this, we skip frequency checks entirely (beep is too far/quiet).
- *
- * 5) **MULTI_WINDOW_CONFIDENCE**:
- *    - Number of consecutive FFT windows that must detect a beep for it to be “confirmed.”
- *    - A higher value => require a beep to persist longer (filters out short pulses).
- *    - A lower value => more sensitive to short beep signals.
- *
- * 6) **DETECTION_DELAY**:
- *    - The minimum time (in ms) between “confirmed beep events.” 
- *    - Prevents counting the same beep twice if it persists or “echoes.”
- *
- * 7) **TIME_WINDOW_MS** and **THRESHOLD_COUNT**:
- *    - Multi-beep logic: If we confirm THRESHOLD_COUNT beeps within TIME_WINDOW_MS, 
- *      we trigger playback. 
- *    - Increase TIME_WINDOW_MS if your beeps occur over a longer period; 
- *      or reduce THRESHOLD_COUNT if you only need 1 or 2 beeps.
- *
- * 8) **LED / Playback Logic**:
- *    - The LED only flashes when `startAudioPlayback()` is called, so we don’t flash on every beep.
- *    - If you want immediate LED feedback on beep detection, add your own `flashLED(...)` call.
- *
- * NOTE: Wiring => BCLK=GPIO14, LRCLK=GPIO15, DOUT=GPIO34, L/R pin => GND => should be “Left” channel, but in practice 
- *                 it's "Right" channel.
+ * @brief Example with beep detection + captive portal 
  */
 
 #include <Arduino.h>
@@ -101,6 +13,9 @@
 // Our beep logic classes
 #include "BeepDetector.h"
 #include "BeepHistory.h"
+
+// Captive Portal
+#include "CaptivePortal.h"
 
 // ---------------------------------------------------------------------------
 // Configuration Constants (RELAXED DETECTION)
@@ -122,28 +37,26 @@ static const int   I2S_DMA_BUF_LEN      = 128;
 // FFT & Beep Detection
 #define SAMPLES                  512
 #define SAMPLING_FREQUENCY       16000
-#define FREQUENCY_MIN            1200      // Lowered a bit to catch slightly lower beeps
-#define FREQUENCY_MAX            9000      // Increased upper range
-static float BIN_AMPLITUDE_THRESHOLD = 10; // Lowered to allow smaller bins
-static float AMPLITUDE_THRESHOLD     = 3000; // Lowered from 10000 to be more lenient
-static const int   I2S_READ_CHUNK    = 64;
-static const int   MIC_PROXIMITY_THRESHOLD = 100; // Could reduce further if beeps are quieter
+#define FREQUENCY_MIN            1200
+#define FREQUENCY_MAX            9000
+static float BIN_AMPLITUDE_THRESHOLD    = 10;
+static float AMPLITUDE_THRESHOLD        = 3000;
+static const int   I2S_READ_CHUNK       = 64;
+static const int   MIC_PROXIMITY_THRESHOLD = 100;
 
-// Consecutive-window detection => E.g. 2 windows instead of 3
-static const int   MULTI_WINDOW_CONFIDENCE  = 4;
-static const unsigned long DETECTION_DELAY  = 1000; // 1s between beep events
-
-// Multi-beep requirement => 3 beeps in 5s
+// Consecutive-window detection
+static const int   MULTI_WINDOW_CONFIDENCE = 4;
+static const unsigned long DETECTION_DELAY  = 1000; // 1s
 static const unsigned long TIME_WINDOW_MS   = 5000;
 static const int           THRESHOLD_COUNT  = 3;
 
 // LED / Button
 #define LED_PIN          2
 #define BUTTON_PIN       25
-static const int   LED_FLASH_DURATION      = 500;
+static const int   LED_FLASH_DURATION = 500;
 
 // ---------------------------------------------------------------------------
-// Instantiate the classes
+// Instantiate classes
 // ---------------------------------------------------------------------------
 BeepDetector beepDetector(MULTI_WINDOW_CONFIDENCE, DETECTION_DELAY);
 BeepHistory  beepHistory(THRESHOLD_COUNT, TIME_WINDOW_MS);
@@ -151,16 +64,6 @@ BeepHistory  beepHistory(THRESHOLD_COUNT, TIME_WINDOW_MS);
 // FFT arrays
 float vReal[SAMPLES];
 float vImag[SAMPLES];
-
-// State
-bool playingAudio         = false;
-unsigned long ignoreBeepUntil = 0;  
-
-float lastAmplitude       = 0.0f;
-float lastMajorFrequency  = 0.0f;
-bool  lastSufficientBins  = false;
-int16_t maxSampleInFrame  = 0;
-
 #include <arduinoFFT.h>
 ArduinoFFT<float> FFT(vReal, vImag, SAMPLES, SAMPLING_FREQUENCY);
 
@@ -169,6 +72,14 @@ BluetoothA2DPSource a2dp_source;
 const char* bluetoothSpeakerName = "C17A";
 const char* audioFilePath        = "/audio1.wav";
 File audioFile;  
+
+// State
+bool playingAudio         = false;
+unsigned long ignoreBeepUntil = 0;  
+int16_t maxSampleInFrame  = 0;
+
+// Captive Portal
+CaptivePortal captivePortal;
 
 // ---------------------------------------------------------------------------
 // Function Declarations
@@ -188,9 +99,8 @@ void runFFT();
 bool detectBeep();
 void handleBeepDetection();
 
-// Note: We'll only flash LED in `startAudioPlayback()`
 // ---------------------------------------------------------------------------
-// Setup and Loop
+// Setup
 // ---------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
@@ -202,26 +112,36 @@ void setup() {
     initI2S();
     initBluetooth();
 
+    // Start the captive portal
+    captivePortal.begin();
+
     Serial.println("System ready. Looking for beeps or button presses...");
 }
 
+// ---------------------------------------------------------------------------
+// Loop
+// ---------------------------------------------------------------------------
 void loop() {
-    // Button => immediate playback
+    // (1) Run captive portal server first
+    captivePortal.handleClients();
+
+    // (2) Button => immediate playback
     if (digitalRead(BUTTON_PIN) == LOW) {
         Serial.println("Button pressed => immediate playback");
         startAudioPlayback();
     }
 
+    // (3) Check if playback ended
     handlePlaybackCompletion();
 
-    // Gather samples + analyze
+    // (4) Gather samples + analyze
     collectAudioSamples();
     runFFT();
     handleBeepDetection();
 }
 
 // ---------------------------------------------------------------------------
-// Gather 256 samples from I2S
+// Gather samples from I2S
 // ---------------------------------------------------------------------------
 void collectAudioSamples() {
     maxSampleInFrame = 0;
@@ -238,7 +158,6 @@ void collectAudioSamples() {
             uint8_t msb = i2sBuffer[i*4 + 3];
 
             int16_t sample16 = (int16_t)((msb << 8) | mid);
-
             if (abs(sample16) > abs(maxSampleInFrame)) {
                 maxSampleInFrame = sample16;
             }
@@ -267,7 +186,6 @@ bool detectBeep() {
     if (abs(maxSampleInFrame) <= MIC_PROXIMITY_THRESHOLD) {
         return false; 
     }
-    // It's "loud enough"
     float majorFrequency = FFT.majorPeak();
     float amplitude      = 0.0f;
     bool  sufficientBins = false;
@@ -283,17 +201,12 @@ bool detectBeep() {
         esp_task_wdt_reset();
     }
 
-    lastAmplitude       = amplitude;
-    lastMajorFrequency  = majorFrequency;
-    lastSufficientBins  = sufficientBins;
-
     bool beepDetected = (
         majorFrequency >= FREQUENCY_MIN &&
         majorFrequency <= FREQUENCY_MAX &&
         amplitude      >  AMPLITUDE_THRESHOLD &&
         sufficientBins
     );
-
     return beepDetected;
 }
 
@@ -311,11 +224,10 @@ void handleBeepDetection() {
         Serial.println("-> A new beep event just got confirmed!");
         beepHistory.addBeep(millis());
 
-        // Check if 3 beep events in last 5s
         if (beepHistory.hasReachedThreshold()) {
-            Serial.println("Beep history => 3 in 5s => Start playback!");
+            Serial.println("Beep history => threshold => Start playback!");
             beepHistory.clear();
-            startAudioPlayback();  // LED flash here
+            startAudioPlayback();
         } else {
             Serial.println("Not enough beep events yet...");
         }
@@ -368,7 +280,7 @@ void handlePlaybackCompletion() {
         if (audioFile) {
             audioFile.close();
         }
-        ignoreBeepUntil = millis() + 1500; // small cooldown
+        ignoreBeepUntil = millis() + 1500;
     }
 }
 
@@ -381,11 +293,13 @@ void initPins() {
     digitalWrite(LED_PIN, LOW);
     Serial.println("Pins init.");
 }
+
 void initWatchdogTimer() {
     esp_task_wdt_init(10, true);
     esp_task_wdt_add(NULL);
     Serial.println("Watchdog init.");
 }
+
 void initSPIFFS() {
     if (!SPIFFS.begin(true)) {
         Serial.println("SPIFFS mount failed!");
@@ -400,6 +314,7 @@ void initSPIFFS() {
         f = root.openNextFile();
     }
 }
+
 void initI2S() {
     Serial.println("[initI2S] Installing driver...");
     i2s_config_t i2s_config = {
@@ -435,6 +350,7 @@ void initI2S() {
     i2s_start(I2S_PORT);
     Serial.println("[initI2S] done.");
 }
+
 void initBluetooth() {
     Serial.println("BT init...");
     a2dp_source.set_auto_reconnect(true);
