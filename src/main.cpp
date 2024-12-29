@@ -1,3 +1,18 @@
+/*****************************************************
+ * Combined Code - Forcing Media Start, with updated onAudioStateChanged
+ * 
+ * Logic:
+ * - We keep scanning logic, beep detection, etc.
+ * - Once the device is "connected", we call
+ *    esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY)
+ *    esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START)
+ *   to push data to the speaker if it never requests it.
+ * 
+ * - The onAudioStateChanged(...) callback logs when the
+ *   speaker transitions states: STARTED, REMOTE_SUSPEND,
+ *   or SUSPENDED.
+ *****************************************************/
+
 #include <Arduino.h>
 #include <SPIFFS.h>
 #include <arduinoFFT.h>
@@ -8,11 +23,11 @@
 #include "BeepDetector.h"
 #include "BeepHistory.h"
 
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 // Configuration Constants
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 
-// I2S
+// I2S microphone pins
 #define I2S_SCK   14
 #define I2S_WS    15
 #define I2S_SD    34
@@ -30,25 +45,25 @@ static const int   I2S_DMA_BUF_LEN       = 128;
 #define SAMPLING_FREQUENCY         16000
 #define FREQUENCY_MIN              1200
 #define FREQUENCY_MAX              9000
-static float BIN_AMPLITUDE_THRESHOLD     = 10;     // for detectBeep
-static float AMPLITUDE_THRESHOLD         = 3000;   // for detectBeep
+static float BIN_AMPLITUDE_THRESHOLD     = 10;
+static float AMPLITUDE_THRESHOLD         = 3000;
 static const int   I2S_READ_CHUNK        = 64;
 static const int   MIC_PROXIMITY_THRESHOLD = 100;
 
 // Consecutive-window detection
 static const int   MULTI_WINDOW_CONFIDENCE = 4;
-static const unsigned long DETECTION_DELAY = 1000; // 1s
-static const unsigned long TIME_WINDOW_MS  = 5000;
-static const int   THRESHOLD_COUNT         = 3;
+static const unsigned long DETECTION_DELAY  = 1000;  
+static const unsigned long TIME_WINDOW_MS   = 5000;
+static const int   THRESHOLD_COUNT          = 3;
 
 // LED / Button
 #define LED_PIN           2
-#define BUTTON_PIN       25
-static const int   LED_FLASH_DURATION    = 500;
+#define BUTTON_PIN        25
+static const int   LED_FLASH_DURATION     = 500;
 
-// ---------------------------------------------------------------------------
-// Our beep logic
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// Instantiate beep logic
+// ------------------------------------------------------
 BeepDetector beepDetector(MULTI_WINDOW_CONFIDENCE, DETECTION_DELAY);
 BeepHistory  beepHistory(THRESHOLD_COUNT, TIME_WINDOW_MS);
 
@@ -58,67 +73,59 @@ float vReal[SAMPLES];
 float vImag[SAMPLES];
 ArduinoFFT<float> FFT(vReal, vImag, SAMPLES, SAMPLING_FREQUENCY);
 
-// ---------------------------------------------------------------------------
-// Subclass so we can call the protected esp_a2d_connect(...)
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// Subclass so we can call protected esp_a2d_connect(...)
+// ------------------------------------------------------
 class MyA2DPSource : public BluetoothA2DPSource {
 public:
-  // Public wrapper for protected method
   esp_err_t connectDevice(const esp_bd_addr_t peer_addr) {
-    // Create a local, non-const copy
     esp_bd_addr_t mutableAddr;
     memcpy(mutableAddr, peer_addr, sizeof(esp_bd_addr_t));
-
-    // Now call the protected method with the non-const pointer
     return esp_a2d_connect(mutableAddr); 
   }
 };
 
-// Data structure to hold discovered devices
+// Structure to store discovered device info
 struct DiscoveredDevice {
     String address;
     String name;
     int8_t rssi;
 };
 
-// ---------------------------------------------------------------------------
-// Scanning & connection state
-// ---------------------------------------------------------------------------
-MyA2DPSource a2dp_source;
+// ------------------------------------------------------
+// Global scanning & connection state
+// ------------------------------------------------------
+MyA2DPSource a2dp_source;  
 
 static std::vector<DiscoveredDevice> discoveredDevices;
-static bool isDiscoveryActive = false;
-static bool isConnected       = false;
-static bool haveLastBestDevice= false;
+static bool isDiscoveryActive   = false;
+static bool haveLastBestDevice  = false;
+static bool connectInProgress   = false;
 static DiscoveredDevice lastBestDevice;
 
-// We'll use the standard 10-second inquiry from esp_bt_gap_start_discovery
-// No extra forced 5-second stop in the loop
-// We'll re-scan only if we connect & then disconnect (or if scanning finishes and no devices found)
-
-static void startScanning();
-static void stopScanning();
-static void connectToBestDevice();
-
-// ---------------------------------------------------------------------------
-// Audio file
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// Audio file (pre-downloaded in SPIFFS)
+// ------------------------------------------------------
 File audioFile;  
 const char* audioFilePath = "/audio1.wav";
 bool playingAudio         = false;
-unsigned long ignoreBeepUntil = 0;  
+unsigned long ignoreBeepUntil = 0;
 int16_t maxSampleInFrame  = 0;
 
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 // Forward declarations
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 void initPins();
 void initWatchdogTimer();
 void initSPIFFS();
 void initI2S();
 void initBluetooth();
 
+void startScanning();
+void stopScanning();
+void connectToBestDevice();
 void gapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
+
 void startAudioPlayback();
 void handlePlaybackCompletion();
 
@@ -128,9 +135,13 @@ bool detectBeep();
 void handleBeepDetection();
 int32_t audioDataCallback(uint8_t* data, int32_t len);
 
-// ---------------------------------------------------------------------------
+// Additional callbacks
+static void onConnectionStateChanged(esp_a2d_connection_state_t state, void*);
+static void onAudioStateChanged(esp_a2d_audio_state_t state, void*);
+
+// ------------------------------------------------------
 // Setup
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 void setup() {
     Serial.begin(115200);
     Serial.println("\n\n[MAIN] Initializing...");
@@ -141,42 +152,41 @@ void setup() {
     initI2S();
     initBluetooth();
 
-    // Start scanning once at startup
-    startScanning();
-
+    startScanning(); // Start scanning once
     Serial.println("[MAIN] Setup complete. Will scan until connected.");
 }
 
-// ---------------------------------------------------------------------------
-// Main Loop
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// Main loop
+// ------------------------------------------------------
 void loop() {
-    // Reset WDT
     esp_task_wdt_reset();
     delay(10);
 
-    // If user presses button, start audio
     if (digitalRead(BUTTON_PIN) == LOW) {
         Serial.println("[MAIN] Button pressed => immediate playback");
         startAudioPlayback();
     }
 
-    // Check if playback ended
     handlePlaybackCompletion();
 
-    // Only run beep detection if we are connected
-    if (isConnected) {
+    // Only run beep detection if connected
+    if (a2dp_source.is_connected()) {
         collectAudioSamples();
         runFFT();
         handleBeepDetection();
     }
 }
 
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 // Start scanning (10s inquiry)
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 void startScanning() {
-    Serial.println("[MAIN] Start scanning (10s inquiry)...");
+    if (connectInProgress || a2dp_source.is_connected()) {
+        Serial.println("[MAIN] Not starting scan (already connecting or connected).");
+        return;
+    }
+    Serial.println("[MAIN] Starting 10s inquiry scan...");
     discoveredDevices.clear();
     haveLastBestDevice = false;
     isDiscoveryActive   = true;
@@ -185,23 +195,75 @@ void startScanning() {
     esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
 }
 
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 // Stop scanning
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 void stopScanning() {
-    Serial.println("[MAIN] Stop scanning...");
-    esp_bt_gap_cancel_discovery();
-    isDiscoveryActive = false;
+    if (isDiscoveryActive) {
+        Serial.println("[MAIN] Stop scanning...");
+        esp_bt_gap_cancel_discovery();
+        isDiscoveryActive = false;
+    }
 }
 
-// ---------------------------------------------------------------------------
-// GAP callback for discovery events
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// Connect to best (highest RSSI) device
+// ------------------------------------------------------
+void connectToBestDevice() {
+    if (discoveredDevices.empty()) {
+        Serial.println("[MAIN] No devices found => let's scan again later...");
+        isDiscoveryActive = false;
+        return;
+    }
+
+    DiscoveredDevice bestDev;
+    int8_t bestRssi = -128;
+    for (auto &d : discoveredDevices) {
+        if (d.rssi > bestRssi) {
+            bestRssi = d.rssi;
+            bestDev  = d;
+        }
+    }
+
+    Serial.println("[MAIN] Summary of discovered devices:");
+    for (auto &dev : discoveredDevices) {
+        Serial.printf("    -> '%s' (%s), RSSI=%d\n", dev.name.c_str(), dev.address.c_str(), dev.rssi);
+    }
+
+    Serial.printf("[MAIN] Best device: '%s' (%s), RSSI=%d\n",
+                  bestDev.name.c_str(), bestDev.address.c_str(), bestDev.rssi);
+
+    uint8_t btAddr[6];
+    if (sscanf(bestDev.address.c_str(), "%x:%x:%x:%x:%x:%x",
+               &btAddr[0], &btAddr[1], &btAddr[2],
+               &btAddr[3], &btAddr[4], &btAddr[5]) == 6) {
+        stopScanning();
+        connectInProgress = true;
+
+        esp_bd_addr_t remoteBdAddr;
+        memcpy(remoteBdAddr, btAddr, 6);
+
+        esp_err_t err = a2dp_source.connectDevice(remoteBdAddr);
+        if (err == ESP_OK) {
+            lastBestDevice     = bestDev;
+            haveLastBestDevice = true;
+            Serial.printf("[MAIN] Connection request sent to '%s' (%s)\n",
+                          bestDev.name.c_str(), bestDev.address.c_str());
+        } else {
+            connectInProgress = false;
+            Serial.printf("[MAIN] Connection request FAILED (0x%x)\n", err);
+        }
+    } else {
+        Serial.println("[MAIN] Could not parse MAC => no connect");
+    }
+}
+
+// ------------------------------------------------------
+// GAP Callback
+// ------------------------------------------------------
 void gapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
     switch (event) {
-
         case ESP_BT_GAP_DISC_RES_EVT: {
-            // Found device(s)
             DiscoveredDevice dev;
             char addrStr[18] = {0};
             sprintf(addrStr, "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -213,7 +275,6 @@ void gapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
             dev.name    = "";
             dev.rssi    = -128;
 
-            // Parse discovered properties
             for (int i = 0; i < param->disc_res.num_prop; i++) {
                 esp_bt_gap_dev_prop_t *p = &param->disc_res.prop[i];
                 switch (p->type) {
@@ -232,7 +293,6 @@ void gapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
                 }
             }
 
-            // Check if we already have this device
             bool alreadyStored = false;
             for (auto &existing : discoveredDevices) {
                 if (existing.address == dev.address) {
@@ -246,7 +306,6 @@ void gapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
                 discoveredDevices.push_back(dev);
             }
 
-            // Log the found device
             Serial.printf("[MAIN][GAP] Found device: '%s' (%s) RSSI=%d\n",
                           dev.name.c_str(), dev.address.c_str(), dev.rssi);
             break;
@@ -254,7 +313,7 @@ void gapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
 
         case ESP_BT_GAP_DISC_STATE_CHANGED_EVT: {
             if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
-                Serial.println("[MAIN][GAP] Discovery ended => connect attempt...");
+                Serial.println("[MAIN][GAP] Discovery ended => connect attempt");
                 isDiscoveryActive = false;
                 connectToBestDevice();
             }
@@ -270,69 +329,12 @@ void gapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Connect to the best (highest RSSI) device
-// ---------------------------------------------------------------------------
-void connectToBestDevice() {
-    if (discoveredDevices.empty()) {
-        Serial.println("[MAIN] No devices found => let's try scanning again...");
-        // Optionally, you can re-start scanning here if desired:
-        startScanning();
-        return;
-    }
-
-    // Pick device with highest RSSI
-    DiscoveredDevice bestDev;
-    int8_t bestRssi = -128;
-    for (auto &d : discoveredDevices) {
-        if (d.rssi > bestRssi) {
-            bestRssi = d.rssi;
-            bestDev  = d;
-        }
-    }
-
-    Serial.println("[MAIN] Summary of discovered devices:");
-    for (auto &dev : discoveredDevices) {
-        Serial.printf("    -> '%s' (%s), RSSI=%d\n",
-                      dev.name.c_str(), dev.address.c_str(), dev.rssi);
-    }
-
-    Serial.printf("[MAIN] Best device: '%s' (%s), RSSI=%d\n",
-                  bestDev.name.c_str(), bestDev.address.c_str(), bestDev.rssi);
-
-    // Convert "AA:BB:CC:DD:EE:FF" => 6-byte array
-    uint8_t btAddr[6];
-    if (sscanf(bestDev.address.c_str(), "%x:%x:%x:%x:%x:%x",
-               &btAddr[0], &btAddr[1], &btAddr[2],
-               &btAddr[3], &btAddr[4], &btAddr[5]) == 6) {
-
-        esp_bd_addr_t remoteBdAddr;
-        memcpy(remoteBdAddr, btAddr, 6);
-
-        // We call our *public* wrapper in MyA2DPSource
-        esp_err_t err = a2dp_source.connectDevice(remoteBdAddr);
-        if (err == ESP_OK) {
-            lastBestDevice     = bestDev;
-            haveLastBestDevice = true;
-            Serial.printf("[MAIN] Connection request sent to '%s' (%s)\n",
-                          bestDev.name.c_str(), bestDev.address.c_str());
-        } else {
-            Serial.printf("[MAIN] Connection request FAILED (0x%x)\n", err);
-            // Optionally re-scan here or wait for next attempt
-            startScanning();
-        }
-    } else {
-        Serial.println("[MAIN] Could not parse MAC => scanning again...");
-        startScanning();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Overridden connection callback to track isConnected
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// onConnectionStateChanged
+// ------------------------------------------------------
 static void onConnectionStateChanged(esp_a2d_connection_state_t state, void*) {
     if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
-        isConnected = true;
+        connectInProgress = false;
         Serial.println("[MAIN] A2DP Source is now connected!");
 
         if (haveLastBestDevice) {
@@ -341,36 +343,64 @@ static void onConnectionStateChanged(esp_a2d_connection_state_t state, void*) {
                           lastBestDevice.address.c_str(),
                           lastBestDevice.rssi);
         }
+
+        // Force A2DP media to start if speaker doesn't request
+        esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+        esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
+
     }
     else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
-        isConnected = false;
+        connectInProgress = false;
         Serial.println("[MAIN] Disconnected from speaker.");
-
-        // Optionally restart scanning so we can reconnect to something
-        startScanning();
+        startScanning(); // re-scan
     }
 }
 
-// ---------------------------------------------------------------------------
-// Audio Data Callback for A2DP
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// onAudioStateChanged
+// ------------------------------------------------------
+static void onAudioStateChanged(esp_a2d_audio_state_t state, void*) {
+    // We want to log STARTED, REMOTE_SUSPEND, or SUSPENDED
+    const char* stateStr = (state == ESP_A2D_AUDIO_STATE_STARTED)         ? "STARTED" :
+                           (state == ESP_A2D_AUDIO_STATE_REMOTE_SUSPEND) ? "REMOTE_SUSPEND" :
+                           (state == ESP_A2D_AUDIO_STATE_STOPPED)        ? "STOPPED" :
+                                                                           "UNKNOWN";
+    Serial.printf("[MAIN] Audio state changed => %s\n", stateStr);
+
+    if (state == ESP_A2D_AUDIO_STATE_STARTED) {
+        Serial.println("[MAIN] Speaker has started requesting audio => streaming data now!");
+    }
+}
+
+// ------------------------------------------------------
+// Audio data callback
+// ------------------------------------------------------
 int32_t audioDataCallback(uint8_t* data, int32_t len) {
-    if (!audioFile || !audioFile.available()) {
+    if (!audioFile) {
+        Serial.println("[MAIN][audioDataCallback] audioFile is NULL => returning 0");
         return 0;
     }
+    if (!audioFile.available()) {
+        Serial.println("[MAIN][audioDataCallback] audioFile has no more data => returning 0");
+        return 0;
+    }
+
     size_t bytesRead = audioFile.read(data, len);
+    Serial.printf("[MAIN][audioDataCallback] Requested=%d, Read=%d\n", len, bytesRead);
+
     return (int32_t)bytesRead;
 }
 
-// ---------------------------------------------------------------------------
-// Start Audio Playback
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// Start playback
+// ------------------------------------------------------
 void startAudioPlayback() {
-    if (!isConnected) {
-        Serial.println("[MAIN] Not connected => skip playback.");
+    if (!a2dp_source.is_connected()) {
+        Serial.println("[MAIN] No Bluetooth connection => skip playback.");
         return;
     }
     if (audioFile) {
+        Serial.println("[MAIN] Closing previously opened audio file before playback...");
         audioFile.close();
     }
     audioFile = SPIFFS.open(audioFilePath, "r");
@@ -385,29 +415,44 @@ void startAudioPlayback() {
 
     playingAudio = true;
     Serial.println("[MAIN] Starting audio playback...");
-    // Flash LED
+    Serial.printf("[MAIN] audioFile.size()=%u\n", (unsigned)audioFile.size());
+
     digitalWrite(LED_PIN, HIGH);
     delay(LED_FLASH_DURATION);
     digitalWrite(LED_PIN, LOW);
+
+    // Optionally, force media start here again if you want:
+    // esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
+    // esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
 }
 
-// ---------------------------------------------------------------------------
-// Handle Playback Completion
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// Handle playback completion
+// ------------------------------------------------------
 void handlePlaybackCompletion() {
+    if (!playingAudio) return;
+
+    if (audioFile) {
+        uint32_t remain = audioFile.available();
+        if (remain < 2000) {
+            Serial.printf("[MAIN] handlePlaybackCompletion => file.available=%u\n", remain);
+        }
+    }
+
     if (playingAudio && (!audioFile || !audioFile.available())) {
         Serial.println("[MAIN] Playback ended.");
         playingAudio = false;
         if (audioFile) {
             audioFile.close();
+            Serial.println("[MAIN] audioFile closed after playback.");
         }
         ignoreBeepUntil = millis() + 1500;
     }
 }
 
-// ---------------------------------------------------------------------------
-// Collect Audio Samples (via I2S) for FFT
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// Mic reading for beep detection
+// ------------------------------------------------------
 void collectAudioSamples() {
     maxSampleInFrame = 0;
     int count = 0;
@@ -416,6 +461,7 @@ void collectAudioSamples() {
         esp_task_wdt_reset();
         uint8_t i2sBuffer[I2S_READ_CHUNK * 4];
         size_t bytesRead = 0;
+
         i2s_read(I2S_PORT, i2sBuffer, sizeof(i2sBuffer), &bytesRead, portMAX_DELAY);
 
         int frames = bytesRead / 4;
@@ -434,18 +480,18 @@ void collectAudioSamples() {
     }
 }
 
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 // Run FFT
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 void runFFT() {
     FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
     FFT.compute(FFTDirection::Forward);
     FFT.complexToMagnitude();
 }
 
-// ---------------------------------------------------------------------------
-// Detect a beep
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// Detect beep
+// ------------------------------------------------------
 bool detectBeep() {
     if (abs(maxSampleInFrame) <= MIC_PROXIMITY_THRESHOLD) {
         return false;
@@ -474,9 +520,9 @@ bool detectBeep() {
     return beepDetected;
 }
 
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 // Handle beep detection
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
 void handleBeepDetection() {
     static bool beepDetectionLogged = false;
     if (!beepDetectionLogged) {
@@ -502,9 +548,9 @@ void handleBeepDetection() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// initPins, initWatchdogTimer, initSPIFFS, initI2S, initBluetooth
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------
+// Pin & Peripherals Init
+// ------------------------------------------------------
 void initPins() {
     pinMode(LED_PIN, OUTPUT);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -521,12 +567,12 @@ void initWatchdogTimer() {
 void initSPIFFS() {
     if (!SPIFFS.begin(true)) {
         Serial.println("[MAIN] SPIFFS mount failed!");
-        while(1){ delay(100); }
+        while (1) { delay(100); }
     }
     Serial.println("[MAIN] SPIFFS mounted.");
     File root = SPIFFS.open("/");
     File f = root.openNextFile();
-    while(f) {
+    while (f) {
         Serial.printf("[MAIN] File: %s\n", f.name());
         f = root.openNextFile();
     }
@@ -539,24 +585,25 @@ void initI2S() {
         .sample_rate = I2S_SAMPLE_RATE,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
         .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
-        .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
+        .communication_format =
+            (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
         .intr_alloc_flags = 0,
-        .dma_buf_count = I2S_DMA_BUF_COUNT,
-        .dma_buf_len = I2S_DMA_BUF_LEN,
-        .use_apll = USE_APLL,
+        .dma_buf_count    = I2S_DMA_BUF_COUNT,
+        .dma_buf_len      = I2S_DMA_BUF_LEN,
+        .use_apll         = USE_APLL,
         .tx_desc_auto_clear = TX_DESC_AUTO_CLEAR,
-        .fixed_mclk = FIXED_MCLK
+        .fixed_mclk       = FIXED_MCLK
     };
 
     esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-    if(err != ESP_OK) {
+    if (err != ESP_OK) {
         Serial.printf("[MAIN][I2S] driver_install failed: %d\n", err);
         while(true){ delay(100); }
     }
     i2s_pin_config_t pinConfig = {
         .bck_io_num     = I2S_SCK,
         .ws_io_num      = I2S_WS,
-        .data_out_num   = -1,    // we only do input from mic
+        .data_out_num   = -1,
         .data_in_num    = I2S_SD
     };
 
@@ -566,7 +613,10 @@ void initI2S() {
         while(true){ delay(100); }
     }
 
-    i2s_set_clk(I2S_PORT, I2S_SAMPLE_RATE, I2S_BITS_PER_SAMPLE_32BIT, I2S_CHANNEL_MONO);
+    i2s_set_clk(I2S_PORT,
+                I2S_SAMPLE_RATE,
+                I2S_BITS_PER_SAMPLE_32BIT,
+                I2S_CHANNEL_MONO);
     i2s_start(I2S_PORT);
     Serial.println("[MAIN][I2S] done.");
 }
@@ -575,11 +625,14 @@ void initBluetooth() {
     Serial.println("[MAIN] BT init...");
 
     // Start the A2DP source
-    a2dp_source.start_raw("ESP32_A2DP", audioDataCallback);
+    a2dp_source.start_raw("ITSREADY", audioDataCallback);
     a2dp_source.set_volume(20);
 
     // Provide robust logs on connection state changes
     a2dp_source.set_on_connection_state_changed(onConnectionStateChanged);
 
-    Serial.println("[MAIN] BT init done. A2DP source started as 'ESP32_A2DP'.");
+    // Also track audio state => print out STARTED or REMOTE_SUSPEND or STOPPED
+    a2dp_source.set_on_audio_state_changed(onAudioStateChanged);
+
+    Serial.println("[MAIN] BT init done. A2DP source started as 'C17A'.");
 }
