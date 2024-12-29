@@ -1,16 +1,10 @@
 /*****************************************************
  * Combined Code - Forcing Media Start, with updated onAudioStateChanged
  * 
- * Logic:
- * - We keep scanning logic, beep detection, etc.
- * - Once the device is "connected", we call
- *    esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY)
- *    esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START)
- *   to push data to the speaker if it never requests it.
- * 
- * - The onAudioStateChanged(...) callback logs when the
- *   speaker transitions states: STARTED, REMOTE_SUSPEND,
- *   or SUSPENDED.
+ * See the notes above to reduce choppiness:
+ *  - Use 44.1 kHz stereo
+ *  - Disable beep detection while playing
+ *  - Increase buffers
  *****************************************************/
 
 #include <Arduino.h>
@@ -27,13 +21,12 @@
 // Configuration Constants
 // ------------------------------------------------------
 
-// I2S microphone pins
 #define I2S_SCK   14
 #define I2S_WS    15
 #define I2S_SD    34
 #define I2S_PORT  I2S_NUM_0
 
-static const int   I2S_SAMPLE_RATE       = 16000;
+static const int   I2S_SAMPLE_RATE       = 44100; // Consider changing to 44100
 static const bool  USE_APLL              = false;
 static const bool  TX_DESC_AUTO_CLEAR    = false;
 static const int   FIXED_MCLK            = 0;
@@ -52,7 +45,7 @@ static const int   MIC_PROXIMITY_THRESHOLD = 100;
 
 // Consecutive-window detection
 static const int   MULTI_WINDOW_CONFIDENCE = 4;
-static const unsigned long DETECTION_DELAY  = 1000;  
+static const unsigned long DETECTION_DELAY  = 1000; 
 static const unsigned long TIME_WINDOW_MS   = 5000;
 static const int   THRESHOLD_COUNT          = 3;
 
@@ -62,7 +55,7 @@ static const int   THRESHOLD_COUNT          = 3;
 static const int   LED_FLASH_DURATION     = 500;
 
 // ------------------------------------------------------
-// Instantiate beep logic
+// Beep Logic
 // ------------------------------------------------------
 BeepDetector beepDetector(MULTI_WINDOW_CONFIDENCE, DETECTION_DELAY);
 BeepHistory  beepHistory(THRESHOLD_COUNT, TIME_WINDOW_MS);
@@ -74,7 +67,7 @@ float vImag[SAMPLES];
 ArduinoFFT<float> FFT(vReal, vImag, SAMPLES, SAMPLING_FREQUENCY);
 
 // ------------------------------------------------------
-// Subclass so we can call protected esp_a2d_connect(...)
+// Subclass to call protected esp_a2d_connect(...)
 // ------------------------------------------------------
 class MyA2DPSource : public BluetoothA2DPSource {
 public:
@@ -85,7 +78,7 @@ public:
   }
 };
 
-// Structure to store discovered device info
+// Structure for discovered device info
 struct DiscoveredDevice {
     String address;
     String name;
@@ -95,7 +88,7 @@ struct DiscoveredDevice {
 // ------------------------------------------------------
 // Global scanning & connection state
 // ------------------------------------------------------
-MyA2DPSource a2dp_source;  
+MyA2DPSource a2dp_source;
 
 static std::vector<DiscoveredDevice> discoveredDevices;
 static bool isDiscoveryActive   = false;
@@ -104,9 +97,9 @@ static bool connectInProgress   = false;
 static DiscoveredDevice lastBestDevice;
 
 // ------------------------------------------------------
-// Audio file (pre-downloaded in SPIFFS)
+// Audio file (in SPIFFS)
 // ------------------------------------------------------
-File audioFile;  
+File audioFile;
 const char* audioFilePath = "/audio1.wav";
 bool playingAudio         = false;
 unsigned long ignoreBeepUntil = 0;
@@ -133,6 +126,7 @@ void collectAudioSamples();
 void runFFT();
 bool detectBeep();
 void handleBeepDetection();
+
 int32_t audioDataCallback(uint8_t* data, int32_t len);
 
 // Additional callbacks
@@ -152,7 +146,7 @@ void setup() {
     initI2S();
     initBluetooth();
 
-    startScanning(); // Start scanning once
+    startScanning();
     Serial.println("[MAIN] Setup complete. Will scan until connected.");
 }
 
@@ -170,8 +164,8 @@ void loop() {
 
     handlePlaybackCompletion();
 
-    // Only run beep detection if connected
-    if (a2dp_source.is_connected()) {
+    // Only run beep detection if connected & not playing
+    if (a2dp_source.is_connected() && !playingAudio) {
         collectAudioSamples();
         runFFT();
         handleBeepDetection();
@@ -207,7 +201,7 @@ void stopScanning() {
 }
 
 // ------------------------------------------------------
-// Connect to best (highest RSSI) device
+// Connect to best device
 // ------------------------------------------------------
 void connectToBestDevice() {
     if (discoveredDevices.empty()) {
@@ -215,7 +209,6 @@ void connectToBestDevice() {
         isDiscoveryActive = false;
         return;
     }
-
     DiscoveredDevice bestDev;
     int8_t bestRssi = -128;
     for (auto &d : discoveredDevices) {
@@ -227,9 +220,9 @@ void connectToBestDevice() {
 
     Serial.println("[MAIN] Summary of discovered devices:");
     for (auto &dev : discoveredDevices) {
-        Serial.printf("    -> '%s' (%s), RSSI=%d\n", dev.name.c_str(), dev.address.c_str(), dev.rssi);
+        Serial.printf("    -> '%s' (%s), RSSI=%d\n",
+                      dev.name.c_str(), dev.address.c_str(), dev.rssi);
     }
-
     Serial.printf("[MAIN] Best device: '%s' (%s), RSSI=%d\n",
                   bestDev.name.c_str(), bestDev.address.c_str(), bestDev.rssi);
 
@@ -352,7 +345,7 @@ static void onConnectionStateChanged(esp_a2d_connection_state_t state, void*) {
     else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
         connectInProgress = false;
         Serial.println("[MAIN] Disconnected from speaker.");
-        startScanning(); // re-scan
+        startScanning(); 
     }
 }
 
@@ -360,7 +353,6 @@ static void onConnectionStateChanged(esp_a2d_connection_state_t state, void*) {
 // onAudioStateChanged
 // ------------------------------------------------------
 static void onAudioStateChanged(esp_a2d_audio_state_t state, void*) {
-    // We want to log STARTED, REMOTE_SUSPEND, or SUSPENDED
     const char* stateStr = (state == ESP_A2D_AUDIO_STATE_STARTED)         ? "STARTED" :
                            (state == ESP_A2D_AUDIO_STATE_REMOTE_SUSPEND) ? "REMOTE_SUSPEND" :
                            (state == ESP_A2D_AUDIO_STATE_STOPPED)        ? "STOPPED" :
@@ -377,7 +369,6 @@ static void onAudioStateChanged(esp_a2d_audio_state_t state, void*) {
 // ------------------------------------------------------
 int32_t audioDataCallback(uint8_t* data, int32_t len) {
     if (!audioFile) {
-        Serial.println("[MAIN][audioDataCallback] audioFile is NULL => returning 0");
         return 0;
     }
     if (!audioFile.available()) {
@@ -420,10 +411,6 @@ void startAudioPlayback() {
     digitalWrite(LED_PIN, HIGH);
     delay(LED_FLASH_DURATION);
     digitalWrite(LED_PIN, LOW);
-
-    // Optionally, force media start here again if you want:
-    // esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
-    // esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
 }
 
 // ------------------------------------------------------
@@ -434,7 +421,7 @@ void handlePlaybackCompletion() {
 
     if (audioFile) {
         uint32_t remain = audioFile.available();
-        if (remain < 2000) {
+        if (remain < 100) {
             Serial.printf("[MAIN] handlePlaybackCompletion => file.available=%u\n", remain);
         }
     }
@@ -628,10 +615,10 @@ void initBluetooth() {
     a2dp_source.start_raw("ITSREADY", audioDataCallback);
     a2dp_source.set_volume(20);
 
-    // Provide robust logs on connection state changes
+    // Provide logs on connection state changes
     a2dp_source.set_on_connection_state_changed(onConnectionStateChanged);
 
-    // Also track audio state => print out STARTED or REMOTE_SUSPEND or STOPPED
+    // Also track audio state => print out STARTED, REMOTE_SUSPEND, STOPPED
     a2dp_source.set_on_audio_state_changed(onAudioStateChanged);
 
     Serial.println("[MAIN] BT init done. A2DP source started as 'C17A'.");
