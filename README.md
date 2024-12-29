@@ -64,6 +64,12 @@ This ESP32-based project detects a specific beep frequency and then plays an aud
    ```
    This will execute the tests defined in the `test/` directory on the development board.
 
+## Print system settings and packages
+```bash
+pio system info
+pio lib list
+```
+
 ## Notes
 
 - **Adjusting Frequency Thresholds**: If your beep frequency differs, you may need to adjust `FREQUENCY_MIN`, `FREQUENCY_MAX`, and amplitude thresholds in the code.

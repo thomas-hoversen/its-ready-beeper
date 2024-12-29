@@ -6,7 +6,10 @@
 #include <WebServer.h>
 
 /**
- * @brief Minimal example of a Captive Portal that always displays "Hello".
+ * @brief Minimal captive portal that:
+ *  - Hosts an AP
+ *  - DNS -> redirect to ourselves
+ *  - Web pages that let user start scanning, list discovered devices, connect to selected speaker
  */
 class CaptivePortal {
 public:
@@ -16,10 +19,11 @@ public:
 
 private:
     void handleRoot();
+    void handleScan();
+    void handleDevices();
+    void handleConnect();
 
-    // Typically, port 53 for DNS, port 80 for HTTP
     static const byte DNS_PORT = 53;
-    
     DNSServer dnsServer; 
     WebServer webServer; 
 };

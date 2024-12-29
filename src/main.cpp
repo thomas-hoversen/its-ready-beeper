@@ -1,6 +1,6 @@
 /**
  * @file main.cpp
- * @brief Example with beep detection + captive portal 
+ * @brief Example with beep detection + captive portal + scanning for speakers
  */
 
 #include <Arduino.h>
@@ -9,10 +9,16 @@
 #include <arduinoFFT.h>
 #include "esp_task_wdt.h"
 #include <driver/i2s.h>
+#include <esp_bt.h>
+#include <esp_gap_bt_api.h>
+#include <esp_a2dp_api.h>
 
 // Our beep logic classes
 #include "BeepDetector.h"
 #include "BeepHistory.h"
+
+// DiscoveredDevice struct
+#include "DiscoveredDevice.h"
 
 // Captive Portal
 #include "CaptivePortal.h"
@@ -53,7 +59,7 @@ static const int           THRESHOLD_COUNT  = 3;
 // LED / Button
 #define LED_PIN          2
 #define BUTTON_PIN       25
-static const int   LED_FLASH_DURATION = 500;
+static const int   LED_FLASH_DURATION    = 500;
 
 // ---------------------------------------------------------------------------
 // Instantiate classes
@@ -69,23 +75,29 @@ ArduinoFFT<float> FFT(vReal, vImag, SAMPLES, SAMPLING_FREQUENCY);
 
 // Bluetooth + Audio
 BluetoothA2DPSource a2dp_source;
-const char* bluetoothSpeakerName = "C17A";
-const char* audioFilePath        = "/audio1.wav";
 File audioFile;  
+const char* audioFilePath = "/audio1.wav";  
 
 // State
 bool playingAudio         = false;
 unsigned long ignoreBeepUntil = 0;  
 int16_t maxSampleInFrame  = 0;
 
-// Captive Portal
+// ---------------------------------------------------------------------------
+// Captive Portal object
+// ---------------------------------------------------------------------------
 CaptivePortal captivePortal;
 
-// ---------------------------------------------------------------------------
-// Function Declarations
-// ---------------------------------------------------------------------------
+/**
+ * These two globals match the 'extern' lines in CaptivePortal.cpp
+ */
+std::vector<DiscoveredDevice> discoveredDevices;  // real definition
+bool scanning = false;                             // real definition
+
+// Forward declarations
 int32_t audioDataCallback(uint8_t* data, int32_t len);
 
+// Extra
 void initPins();
 void initWatchdogTimer();
 void initSPIFFS();
@@ -99,49 +111,61 @@ void runFFT();
 bool detectBeep();
 void handleBeepDetection();
 
+// GAP + scanning
+void startScan();
+void stopScan();
+void onDeviceFound(const DiscoveredDevice& dev);
+static void btGapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
+bool connectToDeviceByMac(const String& macStr);
+
 // ---------------------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------------------
 void setup() {
     Serial.begin(115200);
-    Serial.println("\n\nInitializing (Relaxed Detection)...");
+    Serial.println("\n\n[MAIN] Initializing (Relaxed Detection)...");
 
     initPins();
     initWatchdogTimer();
     initSPIFFS();
-    initI2S();
-    initBluetooth();
+    // initI2S();
+    // initBluetooth();
 
-    // Start the captive portal
+    // Set up captive portal
     captivePortal.begin();
+    Serial.println("[MAIN] CaptivePortal initialized.");
 
-    Serial.println("System ready. Looking for beeps or button presses...");
+    Serial.println("[MAIN] System ready. Looking for beeps or button presses...");
 }
 
 // ---------------------------------------------------------------------------
 // Loop
 // ---------------------------------------------------------------------------
 void loop() {
-    // (1) Run captive portal server first
+    // 1) Captive portal
     captivePortal.handleClients();
 
-    // (2) Button => immediate playback
+    // 2) Button => immediate playback
     if (digitalRead(BUTTON_PIN) == LOW) {
-        Serial.println("Button pressed => immediate playback");
+        Serial.println("[MAIN] Button pressed => immediate playback");
         startAudioPlayback();
     }
+    // Reset the watchdog:
+    esp_task_wdt_reset();
 
-    // (3) Check if playback ended
-    handlePlaybackCompletion();
+    // Give time to other tasks:
+    delay(10);
+    // 3) Check if playback ended
+    // handlePlaybackCompletion();
 
-    // (4) Gather samples + analyze
-    collectAudioSamples();
-    runFFT();
-    handleBeepDetection();
+    // // 4) Gather samples + run FFT
+    // collectAudioSamples();
+    // runFFT();
+    // handleBeepDetection();
 }
 
 // ---------------------------------------------------------------------------
-// Gather samples from I2S
+// collectAudioSamples()
 // ---------------------------------------------------------------------------
 void collectAudioSamples() {
     maxSampleInFrame = 0;
@@ -165,13 +189,14 @@ void collectAudioSamples() {
             vReal[count] = (float)sample16;
             vImag[count] = 0.0f;
             count++;
+            // Kick watchdog
             esp_task_wdt_reset();
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Perform FFT
+// runFFT()
 // ---------------------------------------------------------------------------
 void runFFT() {
     FFT.windowing(FFTWindow::Hamming, FFTDirection::Forward);
@@ -180,9 +205,12 @@ void runFFT() {
 }
 
 // ---------------------------------------------------------------------------
-// Check if there's a beep in this FFT window
+// detectBeep()
 // ---------------------------------------------------------------------------
 bool detectBeep() {
+    // Provide a debug log for beep detection steps
+    // (especially if you want to see how often it's called)
+
     if (abs(maxSampleInFrame) <= MIC_PROXIMITY_THRESHOLD) {
         return false; 
     }
@@ -207,29 +235,39 @@ bool detectBeep() {
         amplitude      >  AMPLITUDE_THRESHOLD &&
         sufficientBins
     );
+
+    if (beepDetected) {
+        Serial.println("[MAIN] Potential beep detected -> meets frequency & amplitude criteria.");
+    }
     return beepDetected;
 }
 
 // ---------------------------------------------------------------------------
-// Use beepDetector + beepHistory => Possibly start audio
+// handleBeepDetection()
 // ---------------------------------------------------------------------------
 void handleBeepDetection() {
-    if (playingAudio) return; 
-    if (millis() < ignoreBeepUntil) return;
+    if (playingAudio) {
+        Serial.println("[MAIN] Currently playing audio; skipping beep detection.");
+        return; 
+    }
+    if (millis() < ignoreBeepUntil) {
+        Serial.println("[MAIN] Still ignoring beeps (cooldown).");
+        return;
+    }
 
     bool beepInThisWindow = detectBeep();
     bool beepEvent = beepDetector.update(beepInThisWindow, millis());
 
     if (beepEvent) {
-        Serial.println("-> A new beep event just got confirmed!");
+        Serial.println("[MAIN] -> A new beep event just got confirmed!");
         beepHistory.addBeep(millis());
 
         if (beepHistory.hasReachedThreshold()) {
-            Serial.println("Beep history => threshold => Start playback!");
+            Serial.println("[MAIN] Beep history => threshold => Start playback!");
             beepHistory.clear();
             startAudioPlayback();
         } else {
-            Serial.println("Not enough beep events yet...");
+            Serial.println("[MAIN] Not enough beep events yet...");
         }
     }
 }
@@ -246,8 +284,9 @@ int32_t audioDataCallback(uint8_t* data, int32_t len) {
 }
 
 void startAudioPlayback() {
+    Serial.println("[MAIN] startAudioPlayback called...");
     if (!a2dp_source.is_connected()) {
-        Serial.println("No BT connection => skip playback");
+        Serial.println("[MAIN] No BT connection => skip playback");
         return;
     }
     if (audioFile) {
@@ -255,19 +294,19 @@ void startAudioPlayback() {
     }
     audioFile = SPIFFS.open(audioFilePath, "r");
     if (!audioFile || !audioFile.available()) {
-        Serial.println("Audio file not available => skip");
+        Serial.println("[MAIN] Audio file not available => skip");
         return;
     }
     if (!audioFile.seek(0, SeekSet)) {
-        Serial.println("Failed to rewind audio file => skip");
+        Serial.println("[MAIN] Failed to rewind audio file => skip");
         return;
     }
 
     playingAudio = true;
-    Serial.println("Starting audio playback...");
+    Serial.println("[MAIN] Starting audio playback...");
 
     // ONLY flash LED right before playing
-    Serial.println("Flashing LED because audio is about to play...");
+    Serial.println("[MAIN] Flashing LED because audio is about to play...");
     digitalWrite(LED_PIN, HIGH);
     delay(LED_FLASH_DURATION);
     digitalWrite(LED_PIN, LOW);
@@ -275,53 +314,64 @@ void startAudioPlayback() {
 
 void handlePlaybackCompletion() {
     if (playingAudio && (!audioFile || !audioFile.available())) {
-        Serial.println("Playback ended.");
+        Serial.println("[MAIN] Playback ended.");
         playingAudio = false;
         if (audioFile) {
             audioFile.close();
         }
+        // Provide a short ignore window after playback ends
         ignoreBeepUntil = millis() + 1500;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Init
+// initPins()
 // ---------------------------------------------------------------------------
 void initPins() {
     pinMode(LED_PIN, OUTPUT);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     digitalWrite(LED_PIN, LOW);
-    Serial.println("Pins init.");
+    Serial.println("[MAIN] Pins init done.");
 }
 
+// ---------------------------------------------------------------------------
+// initWatchdogTimer()
+// ---------------------------------------------------------------------------
 void initWatchdogTimer() {
     esp_task_wdt_init(10, true);
     esp_task_wdt_add(NULL);
-    Serial.println("Watchdog init.");
+    Serial.println("[MAIN] Watchdog init done.");
 }
 
+// ---------------------------------------------------------------------------
+// initSPIFFS()
+// ---------------------------------------------------------------------------
 void initSPIFFS() {
     if (!SPIFFS.begin(true)) {
-        Serial.println("SPIFFS mount failed!");
+        Serial.println("[MAIN] SPIFFS mount failed!");
         while(1){delay(100);}
     }
-    Serial.println("SPIFFS mounted.");
+    Serial.println("[MAIN] SPIFFS mounted successfully.");
     File root = SPIFFS.open("/");
     File f = root.openNextFile();
     while(f) {
-        Serial.print("File: ");
-        Serial.println(f.name());
+        Serial.printf("[MAIN] Found file: %s\n", f.name());
         f = root.openNextFile();
     }
 }
 
+// ---------------------------------------------------------------------------
+// initI2S()
+// ---------------------------------------------------------------------------
 void initI2S() {
-    Serial.println("[initI2S] Installing driver...");
+    Serial.println("[MAIN] initI2S: Installing I2S driver...");
     i2s_config_t i2s_config = {
         .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = I2S_SAMPLE_RATE,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
         .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
+        // Note: I2S_COMM_FORMAT_I2S and I2S_COMM_FORMAT_I2S_MSB are deprecated,
+        // but still used widely. Future versions may need an updated approach.
         .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
         .intr_alloc_flags = 0,
         .dma_buf_count = I2S_DMA_BUF_COUNT,
@@ -332,7 +382,7 @@ void initI2S() {
     };
     esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
     if(err != ESP_OK) {
-        Serial.printf("[initI2S] driver_install failed: %d\n", err);
+        Serial.printf("[MAIN][initI2S] driver_install failed: %d\n", err);
         while(true){delay(100);}
     }
     i2s_pin_config_t pinConfig = {
@@ -343,21 +393,150 @@ void initI2S() {
     };
     err = i2s_set_pin(I2S_PORT, &pinConfig);
     if(err != ESP_OK){
-        Serial.printf("[initI2S] set_pin failed: %d\n", err);
+        Serial.printf("[MAIN][initI2S] set_pin failed: %d\n", err);
         while(true){delay(100);}
     }
     i2s_set_clk(I2S_PORT, I2S_SAMPLE_RATE, I2S_BITS_PER_SAMPLE_32BIT, I2S_CHANNEL_MONO);
     i2s_start(I2S_PORT);
-    Serial.println("[initI2S] done.");
+    Serial.println("[MAIN] initI2S done.");
 }
 
+// ---------------------------------------------------------------------------
+// initBluetooth()
+// ---------------------------------------------------------------------------
 void initBluetooth() {
-    Serial.println("BT init...");
+    Serial.println("[MAIN] initBluetooth: Starting Classic BT...");
+
+    // Enable Classic BT if not started
+    if (!btStarted() && !btStart()) {
+        Serial.println("[MAIN][BT] Failed to start classic BT stack!");
+        return;
+    }
+
+    // Register GAP callback
+    esp_bt_gap_register_callback(btGapCallback);
+
+    // Initialize A2DP source
     a2dp_source.set_auto_reconnect(true);
     a2dp_source.set_on_connection_state_changed([](esp_a2d_connection_state_t state, void*){
-        Serial.printf("[BT] Connection => %s\n", a2dp_source.to_str(state));
+        Serial.printf("[MAIN][BT] Connection => %s\n", a2dp_source.to_str(state));
     });
-    a2dp_source.start_raw(bluetoothSpeakerName, audioDataCallback);
+
+    // Start A2DP (raw)
+    a2dp_source.start_raw("ESP32_A2DP", audioDataCallback);
     a2dp_source.set_volume(20);
-    Serial.printf("BT name='%s' => connect speaker.\n", bluetoothSpeakerName);
+    Serial.println("[MAIN] initBluetooth => ESP32_A2DP");
+}
+
+// ---------------------------------------------------------------------------
+// startScan(), stopScan()
+// ---------------------------------------------------------------------------
+void startScan() {
+    if (scanning) {
+        Serial.println("[MAIN][BT] Already scanning");
+        return;
+    }
+    discoveredDevices.clear();
+    scanning = true;
+    // 10s general inquiry
+    esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, 10, 0);
+    Serial.println("[MAIN][BT] Starting discovery (10s)...");
+}
+
+void stopScan() {
+    if (!scanning) {
+        Serial.println("[MAIN][BT] Called stopScan but was not scanning.");
+        return;
+    }
+    esp_bt_gap_cancel_discovery();
+    scanning = false;
+    Serial.println("[MAIN][BT] Scanning stopped.");
+}
+
+// ---------------------------------------------------------------------------
+// onDeviceFound()
+// ---------------------------------------------------------------------------
+void onDeviceFound(const DiscoveredDevice& dev) {
+    // Check duplicates
+    for (auto &d : discoveredDevices) {
+        if (d.address == dev.address) {
+            Serial.println("[MAIN][BT] Device is already in discoveredDevices, skipping.");
+            return;
+        }
+    }
+    discoveredDevices.push_back(dev);
+    Serial.printf("[MAIN][BT] Discovered: %s (%s)\n", dev.name.c_str(), dev.address.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// GAP Callback
+// ---------------------------------------------------------------------------
+static void btGapCallback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
+    switch (event) {
+    case ESP_BT_GAP_DISC_RES_EVT: {
+        // Found device(s)
+        char addrStr[18];
+        sprintf(addrStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+                param->disc_res.bda[0], param->disc_res.bda[1],
+                param->disc_res.bda[2], param->disc_res.bda[3],
+                param->disc_res.bda[4], param->disc_res.bda[5]);
+
+        String devName;
+        for (int i = 0; i < param->disc_res.num_prop; i++) {
+            esp_bt_gap_dev_prop_t *p = param->disc_res.prop + i;
+            if (p->type == ESP_BT_GAP_DEV_PROP_BDNAME) {
+                char name[249] = {0};
+                memcpy(name, (char*)p->val, p->len);
+                devName = String(name);
+            }
+        }
+        DiscoveredDevice dd;
+        dd.address = String(addrStr);
+        dd.name    = devName;
+        onDeviceFound(dd);
+        break;
+    }
+
+    case ESP_BT_GAP_DISC_STATE_CHANGED_EVT: {
+        if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
+            scanning = false;
+            Serial.println("[MAIN][BT] Discovery stopped (callback).");
+        } else if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STARTED) {
+            Serial.println("[MAIN][BT] Discovery started (callback).");
+        }
+        break;
+    }
+
+    default:
+        // If you want to see all other events, you can log them here
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// connectToDeviceByMac()
+// ---------------------------------------------------------------------------
+bool connectToDeviceByMac(const String& macStr) {
+    Serial.printf("[MAIN][BT] connectToDeviceByMac called with %s\n", macStr.c_str());
+    // Convert "XX:XX:XX:XX:XX:XX" => 6-byte array
+    uint8_t mac[6];
+    int vals[6];
+    if (sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x",
+               &vals[0], &vals[1], &vals[2],
+               &vals[3], &vals[4], &vals[5]) == 6) {
+        for (int i = 0; i < 6; i++) {
+            mac[i] = (uint8_t) vals[i];
+        }
+        // Now attempt to connect
+        esp_err_t err = esp_a2d_source_connect(mac);
+        if (err == ESP_OK) {
+            Serial.println("[MAIN][BT] Connect request sent successfully.");
+            return true;
+        } else {
+            Serial.printf("[MAIN][BT] Connect request failed: 0x%x\n", err);
+            return false;
+        }
+    }
+    Serial.println("[MAIN][BT] Could not parse MAC.");
+    return false;
 }
