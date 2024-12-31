@@ -3,9 +3,17 @@
 #include <SPIFFS.h>
 
 /**
- * Example: We'll read from a file in SPIFFS, returning the bytes in `audioDataCallback`.
+ * We'll read from /audio1.wav in SPIFFS. But to reduce SPIFFS read latencies,
+ * we will do a small read-ahead buffering in RAM. The A2DP callback then
+ * pulls from that buffer rather than calling file.read() repeatedly.
  */
 static File audioFile;
+
+// Read-ahead buffer to smooth out SPIFFS access (option 3)
+#define READAHEAD_SIZE 2048
+static uint8_t readAheadBuffer[READAHEAD_SIZE];
+static size_t  bufferDataLen  = 0;   // how many bytes in buffer
+static size_t  bufferReadPos  = 0;   // current read offset within buffer
 
 // Our instance of MyA2DPSimple
 static MyA2DPSimple a2dpSimple;
@@ -18,19 +26,36 @@ static MyA2DPSimple a2dpSimple;
 static bool playingAudio = false;
 
 // ---------------------------------------------------------------------------
-// Audio data callback for the A2DP source
+// A2DP audio data callback
 // ---------------------------------------------------------------------------
 int32_t audioDataCallback(uint8_t* data, int32_t len) {
-    // If file isn't open or no data left, return 0 => signals "no more audio"
+    // If file isn't open or no data left in file, return 0 => signals "no more audio"
     if (!audioFile || !audioFile.available()) {
         return 0;
     }
-    // Read up to len bytes from the file
-    size_t bytesRead = audioFile.read(data, len);
-    // Uncomment for debug:
-    //Serial.printf("[audioDataCallback] Requested=%d, Read=%d\n", len, bytesRead);
 
-    return (int32_t)bytesRead;
+    // If our read-ahead buffer is empty or we consumed it, fill it again
+    if (bufferReadPos >= bufferDataLen) {
+        bufferDataLen = audioFile.read(readAheadBuffer, READAHEAD_SIZE);
+        bufferReadPos = 0;
+        // If still zero => no more data
+        if (bufferDataLen == 0) {
+            return 0;
+        }
+    }
+
+    // Calculate how many bytes we can provide from our buffer
+    int32_t available = bufferDataLen - bufferReadPos;
+    int32_t toCopy    = (available < len) ? available : len;
+
+    // Copy from read-ahead buffer into the output "data" buffer
+    memcpy(data, readAheadBuffer + bufferReadPos, toCopy);
+    bufferReadPos += toCopy;
+
+    // **Minimal debug** to avoid overhead (option 2)
+    // Serial.printf("[audioDataCallback] Requested=%d, Provided=%d\n", len, toCopy);
+
+    return toCopy;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,7 +77,7 @@ void startAudioPlayback() {
         return;
     }
 
-    // If audioFile is already open, close it to reset
+    // If audioFile is already open, close it
     if (audioFile) {
         Serial.println("[MAIN] Closing previously opened audio file before playback...");
         audioFile.close();
@@ -75,6 +100,10 @@ void startAudioPlayback() {
         audioFile.close();
         return;
     }
+
+    // Reset the read-ahead buffer
+    bufferDataLen = 0;
+    bufferReadPos = 0;
 
     // Mark as playing
     playingAudio = true;
@@ -105,8 +134,8 @@ void handlePlaybackCompletion() {
 void initSPIFFS() {
     if (!SPIFFS.begin(true)) {
         Serial.println("[MAIN] SPIFFS mount failed!");
-        while (true) { 
-            delay(100); 
+        while (true) {
+            delay(100);
         }
     }
     Serial.println("[MAIN] SPIFFS successfully mounted.");
@@ -155,6 +184,6 @@ void loop() {
     // Check if we're done playing
     handlePlaybackCompletion();
 
-    // Optional: do other tasks, e.g. re-scan if needed, etc.
-    delay(50);
+    // Minimal delay to allow other tasks to run (option 2)
+    delay(10);
 }

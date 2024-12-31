@@ -71,19 +71,39 @@ void MyA2DPSimple::begin(const char* deviceName, MyAudioDataCB dataCB) {
     esp_a2d_register_callback(&MyA2DPSimple::a2dpCallback);
     esp_a2d_source_register_data_callback(&MyA2DPSimple::a2dpDataCallback);
 
+    // ----------------------
+    // (Option 6) If your SDK or Arduino core supports a direct SBC config call,
+    // you can specify bitpool, sample rate, etc. For example:
+    /*
+    esp_a2d_sbc_config_t sbc_config = {
+        .sample_freq = ESP_A2D_SBC_FREQ_44K, // 44.1kHz
+        .block_len   = ESP_A2D_SBC_BLOCK_LEN_16,
+        .num_subbands= ESP_A2D_SBC_SUBBAND_8,
+        .alloc_method= ESP_A2D_SBC_ALLOC_METHOD_LOUDNESS,
+        .channel_mode= ESP_A2D_SBC_CHANNEL_MODE_JOINT_STEREO,
+        .min_bitpool = 2,
+        .max_bitpool = 53 // default or can be changed
+    };
+    esp_a2d_source_set_sbc_params(&sbc_config);
+    */
+    // ----------------------
+
     // 7) Make device connectable/discoverable
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
 
     // ---------------------------------------------------
     // 8) Create background task
+    // Increase stack size a bit to handle heavier loads (option 2)
     _myTaskQueue = xQueueCreate(10, sizeof(my_bt_app_msg_t));
-    if (xTaskCreatePinnedToCore(MyA2DPSimple::myTaskHandler,
-                                "myBtAppTask",
-                                4096, 
-                                NULL,
-                                configMAX_PRIORITIES - 3,
-                                &_myTaskHandle,
-                                0) != pdPASS) {
+    if (xTaskCreatePinnedToCore(
+            MyA2DPSimple::myTaskHandler,
+            "myBtAppTask",
+            8192, // bigger stack size for stability
+            NULL,
+            configMAX_PRIORITIES - 3, // fairly high priority
+            &_myTaskHandle,
+            0) != pdPASS)
+    {
         Serial.println("[MyA2DPSimple] Could not create background task!");
     }
 
@@ -133,6 +153,7 @@ void MyA2DPSimple::end() {
 // Start scanning
 // -------------------------------------------------------
 void MyA2DPSimple::startScan() {
+    // (Option 5) do NOT scan if already connected
     if (!_initialized) {
         Serial.println("[MyA2DPSimple] Not initialized => no scan.");
         return;
@@ -291,16 +312,15 @@ void MyA2DPSimple::handleA2DPEvent(esp_a2d_cb_event_t event, esp_a2d_cb_param_t 
             _connected  = true;
             Serial.println("[MyA2DPSimple] A2DP connected => streaming can start");
 
-            // ------------------------------------------------------------------
-            // FORCE the speaker to begin playing, since it has no Play button:
+            // Force the speaker to begin playing (it has no Play button)
             esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
             esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
-            // ------------------------------------------------------------------
 
         } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
             _connecting = false;
             _connected  = false;
             Serial.println("[MyA2DPSimple] A2DP disconnected => maybe re-scan");
+            // If you want to automatically reconnect, do so here:
             startScan();
         }
         break;
@@ -373,14 +393,14 @@ bool MyA2DPSimple::myWorkDispatch(my_bt_app_cb_t p_cback,
     my_bt_app_msg_t msg;
     memset(&msg, 0, sizeof(my_bt_app_msg_t));
 
-    msg.sig = MY_SIG_WORK_DISPATCH;
+    msg.sig   = MY_SIG_WORK_DISPATCH;
     msg.event = event;
-    msg.cb = p_cback;
+    msg.cb    = p_cback;
 
     if (param_len == 0) {
         return mySendMsg(&msg);
     } else if (p_params && param_len > 0) {
-        msg.param = malloc(param_len);
+        msg.param = (void*)malloc(param_len);
         if (msg.param) {
             memcpy(msg.param, p_params, param_len);
             return mySendMsg(&msg);
