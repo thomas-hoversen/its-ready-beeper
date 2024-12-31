@@ -1,7 +1,4 @@
 #include "MyA2DPSimple.h"
-//#include "BluetoothA2DPSource.h"
-
-static const char* TAG = "MyA2DPSimple";
 
 // Single static pointer to access from C callbacks
 MyA2DPSimple* MyA2DPSimple::_instance = nullptr;
@@ -40,7 +37,7 @@ void MyA2DPSimple::begin(const char* deviceName, MyAudioDataCB dataCB) {
     ESP_ERROR_CHECK(ret);
 
     // ---------------------------------------------------
-    // 2) Start the BT controller using bt_start()
+    // 2) Start the BT controller using btStart()
     if (!btStart()) {
         Serial.println("[MyA2DPSimple] bt_start() failed => cannot proceed.");
         return;
@@ -68,20 +65,6 @@ void MyA2DPSimple::begin(const char* deviceName, MyAudioDataCB dataCB) {
     esp_a2d_source_init();
     esp_a2d_register_callback(&MyA2DPSimple::a2dpCallback);
     esp_a2d_source_register_data_callback(&MyA2DPSimple::a2dpDataCallback);
-
-    // Optional: you can set SBC parameters here (not strictly required)
-    /*
-    esp_a2d_sbc_config_t sbc_config = {
-        .sample_freq  = ESP_A2D_SBC_FREQ_44K,
-        .block_len    = ESP_A2D_SBC_BLOCK_LEN_16,
-        .num_subbands = ESP_A2D_SBC_SUBBAND_8,
-        .alloc_method = ESP_A2D_SBC_ALLOC_METHOD_LOUDNESS,
-        .channel_mode = ESP_A2D_SBC_CHANNEL_MODE_JOINT_STEREO,
-        .min_bitpool  = 2,
-        .max_bitpool  = 53
-    };
-    esp_a2d_source_set_sbc_params(&sbc_config);
-    */
 
     // 7) Make device connectable/discoverable
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
@@ -220,6 +203,7 @@ void MyA2DPSimple::handleGapEvent(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_par
         if (!found) {
             _discovered.push_back(dev);
         }
+        // Keep this log
         Serial.printf("[MyA2DPSimple][GAP] Found: '%s' (%s), RSSI=%d\n",
                       dev.name.c_str(), dev.address.c_str(), dev.rssi);
         break;
@@ -234,7 +218,7 @@ void MyA2DPSimple::handleGapEvent(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_par
                 Serial.printf("    -> '%s' (%s), RSSI=%d\n",
                               dev.name.c_str(), dev.address.c_str(), dev.rssi);
             }
-            // Dispatch an event to connect
+            // Dispatch connect in the background
             myWorkDispatch([](uint16_t e, void* p) {
                 _instance->connectToBest();
             }, EVENT_CONNECT_BEST, nullptr, 0);
@@ -305,7 +289,7 @@ void MyA2DPSimple::handleA2DPEvent(esp_a2d_cb_event_t event, esp_a2d_cb_param_t 
             _connected  = true;
             Serial.println("[MyA2DPSimple] A2DP connected => streaming can start");
 
-            // Force the speaker to begin playing
+            // Start streaming
             esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
             esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
 
@@ -313,7 +297,7 @@ void MyA2DPSimple::handleA2DPEvent(esp_a2d_cb_event_t event, esp_a2d_cb_param_t 
             _connecting = false;
             _connected  = false;
             Serial.println("[MyA2DPSimple] A2DP disconnected => maybe re-scan");
-            startScan(); // auto re-scan if you wish
+            startScan(); // auto re-scan
         }
         break;
     }
@@ -401,6 +385,13 @@ bool MyA2DPSimple::myWorkDispatch(my_bt_app_cb_t p_cback,
         }
     }
     return false;
+}
+
+// -------------------------------------------------------
+// Return whether we're currently connecting
+// -------------------------------------------------------
+bool MyA2DPSimple::isConnecting() const {
+    return _connecting;
 }
 
 // -------------------------------------------------------

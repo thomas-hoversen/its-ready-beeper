@@ -44,8 +44,9 @@ public:
     // Check connection & scanning status
     bool isConnected() const;
     bool isScanning()  const;
-    // NEW: check if currently attempting to connect
-    bool isConnecting() const { return _connecting; }
+    
+    // NEW: declare isConnecting() here, but don't define inline.
+    bool isConnecting() const;
 
     void startScan();
     void stopScan();
