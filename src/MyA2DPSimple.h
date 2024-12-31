@@ -21,7 +21,7 @@ struct MyA2DPDevice {
     int8_t rssi;
 };
 
-// Callback type for incoming A2DP data requests.
+// Callback type for incoming A2DP data requests
 typedef int32_t (*MyAudioDataCB)(uint8_t* data, int32_t len);
 
 // For event queue
@@ -35,7 +35,6 @@ struct my_bt_app_msg_t {
     void        *param;    // parameter area needs to be last
 };
 
-// Our custom class
 class MyA2DPSimple {
 public:
     MyA2DPSimple();
@@ -47,7 +46,9 @@ public:
     void end();
 
     // Check if we are currently connected to a remote device
-    bool isConnected() const { return _connected; }
+    bool isConnected() const;
+    // Check if we are currently scanning
+    bool isScanning() const;
 
     // Start scanning for nearby devices
     void startScan();
@@ -63,7 +64,7 @@ private:
     static void a2dpCallback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param);
     void handleA2DPEvent(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param);
 
-    // *** FIX: updated to match A2DP's required signature ***
+    // Must match esp_a2d_source_data_cb_t
     static int32_t a2dpDataCallback(uint8_t *data, int32_t len);
     static int32_t dataCallbackImpl(uint8_t* data, int32_t len);
 

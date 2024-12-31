@@ -9,7 +9,7 @@
  */
 static File audioFile;
 
-// Read-ahead buffer to smooth out SPIFFS access (option 3)
+// Read-ahead buffer to smooth out SPIFFS access
 #define READAHEAD_SIZE 2048
 static uint8_t readAheadBuffer[READAHEAD_SIZE];
 static size_t  bufferDataLen  = 0;   // how many bytes in buffer
@@ -18,11 +18,14 @@ static size_t  bufferReadPos  = 0;   // current read offset within buffer
 // Our instance of MyA2DPSimple
 static MyA2DPSimple a2dpSimple;
 
-// For a simple LED blink when playback starts
-#define LED_PIN    2
+// LED pins
+#define LED_BLUE      16
+#define LED_ORANGE    17
+
 // Button pin for triggering playback
 #define BUTTON_PIN 25
-// Flag to track whether we are currently playing audio
+
+// Flag to track whether we are currently playing audio (local WAV -> BT)
 static bool playingAudio = false;
 
 // ---------------------------------------------------------------------------
@@ -52,21 +55,12 @@ int32_t audioDataCallback(uint8_t* data, int32_t len) {
     memcpy(data, readAheadBuffer + bufferReadPos, toCopy);
     bufferReadPos += toCopy;
 
-    // **Minimal debug** to avoid overhead (option 2)
-    // Serial.printf("[audioDataCallback] Requested=%d, Provided=%d\n", len, toCopy);
-
     return toCopy;
 }
 
 // ---------------------------------------------------------------------------
 // Playback control
 // ---------------------------------------------------------------------------
-void flashLED(int pin, int durationMs) {
-    digitalWrite(pin, HIGH);
-    delay(durationMs);
-    digitalWrite(pin, LOW);
-}
-
 /**
  * @brief Attempts to open and rewind /audio1.wav from SPIFFS, then sets playingAudio = true
  */
@@ -108,9 +102,6 @@ void startAudioPlayback() {
     // Mark as playing
     playingAudio = true;
     Serial.println("[MAIN] Starting audio playback...");
-
-    // Quick LED blink to show playback triggered
-    flashLED(LED_PIN, 300);
 }
 
 /**
@@ -154,21 +145,40 @@ void initSPIFFS() {
 // ---------------------------------------------------------------------------
 // Standard setup/loop
 // ---------------------------------------------------------------------------
+
+// Variables to handle the "connected LED" 3-second bright phase
+static bool     connectedLedActive    = false;
+static uint32_t connectedLedStartMs   = 0;
+
+// Keep track of whether we were connected previously, for detecting new connection
+static bool wasConnected = false;
+
+// For the blue LED fading while scanning
+static int   fadeValue      = 0;   // current PWM value for LED_BLUE
+static int   fadeIncrement  = 5;   // how fast to fade in/out (bigger = faster)
+
 void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n[MAIN] Starting...");
 
     // Initialize pins
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, LOW);
+    pinMode(LED_ORANGE, OUTPUT);
+    digitalWrite(LED_ORANGE, LOW);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+    // --- Use LEDC for BLUE LED to achieve a fade effect ---
+    // Channel 0, 5kHz, 8-bit resolution
+    ledcSetup(0, 5000, 8);
+    // Attach the BLUE pin to channel 0
+    ledcAttachPin(LED_BLUE, 0);
+    // Start with the blue LED off
+    ledcWrite(0, 0);
 
     // Initialize SPIFFS so we can open an audio file
     initSPIFFS();
 
-    // Initialize custom A2DP library
-    // (This begins scanning and will eventually connect automatically)
+    // Initialize custom A2DP library (automatically starts scanning)
     a2dpSimple.begin("MyESP32_Simple", audioDataCallback);
 
     Serial.println("[MAIN] Setup complete. Now scanning for devices...");
@@ -177,13 +187,62 @@ void setup() {
 void loop() {
     // Check if the user pressed the button => start playback
     if (digitalRead(BUTTON_PIN) == LOW) {
-        Serial.println("[MAIN] Button pressed => starting playback...");
-        startAudioPlayback();
+        if (!playingAudio) {
+            Serial.println("[MAIN] Button pressed => starting playback...");
+            startAudioPlayback();
+        } else {
+            Serial.println("[MAIN] Button pressed => already playing => ignoring...");
+        }
     }
 
     // Check if we're done playing
     handlePlaybackCompletion();
 
-    // Minimal delay to allow other tasks to run (option 2)
+    // Turn orange LED on/off depending on audio playback
+    if (playingAudio) {
+        digitalWrite(LED_ORANGE, HIGH);
+    } else {
+        digitalWrite(LED_ORANGE, LOW);
+    }
+
+    // Track scanning & connected states for the blue LED
+    bool nowScanning  = a2dpSimple.isScanning();
+    bool nowConnected = a2dpSimple.isConnected();
+
+    // 1) Handle the 3-second "connected" bright LED if we just connected
+    if (nowConnected && !wasConnected) {
+        connectedLedActive  = true;
+        connectedLedStartMs = millis();
+        ledcWrite(0, 255);
+        Serial.println("[MAIN] Blue LED => FULL BRIGHT (connected).");
+    }
+
+    // 2) Connected bright phase
+    if (connectedLedActive) {
+        if (millis() - connectedLedStartMs >= 3000) {
+            connectedLedActive = false;
+            ledcWrite(0, 0);
+            Serial.println("[MAIN] Blue LED => OFF (post-connection).");
+        }
+    }
+    // 3) Fade while scanning & not connected
+    else {
+        if (nowScanning && !nowConnected) {
+            fadeValue += fadeIncrement;
+            if (fadeValue >= 255) {
+                fadeValue = 255;
+                fadeIncrement = -fadeIncrement;
+            } else if (fadeValue <= 0) {
+                fadeValue = 0;
+                fadeIncrement = -fadeIncrement;
+            }
+            ledcWrite(0, fadeValue);
+        } else {
+            ledcWrite(0, 0);
+        }
+    }
+
+    wasConnected = nowConnected;
+
     delay(10);
 }

@@ -1,5 +1,6 @@
 #include "MyA2DPSimple.h"
-#include "BluetoothA2DPSource.h"
+//#include "BluetoothA2DPSource.h"
+
 static const char* TAG = "MyA2DPSimple";
 
 // Single static pointer to access from C callbacks
@@ -38,9 +39,6 @@ void MyA2DPSimple::begin(const char* deviceName, MyAudioDataCB dataCB) {
     }
     ESP_ERROR_CHECK(ret);
 
-    // (Optional) Release BLE memory if you want:
-    // ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
-
     // ---------------------------------------------------
     // 2) Start the BT controller using bt_start()
     if (!btStart()) {
@@ -71,36 +69,32 @@ void MyA2DPSimple::begin(const char* deviceName, MyAudioDataCB dataCB) {
     esp_a2d_register_callback(&MyA2DPSimple::a2dpCallback);
     esp_a2d_source_register_data_callback(&MyA2DPSimple::a2dpDataCallback);
 
-    // ----------------------
-    // (Option 6) If your SDK or Arduino core supports a direct SBC config call,
-    // you can specify bitpool, sample rate, etc. For example:
+    // Optional: you can set SBC parameters here (not strictly required)
     /*
     esp_a2d_sbc_config_t sbc_config = {
-        .sample_freq = ESP_A2D_SBC_FREQ_44K, // 44.1kHz
-        .block_len   = ESP_A2D_SBC_BLOCK_LEN_16,
-        .num_subbands= ESP_A2D_SBC_SUBBAND_8,
-        .alloc_method= ESP_A2D_SBC_ALLOC_METHOD_LOUDNESS,
-        .channel_mode= ESP_A2D_SBC_CHANNEL_MODE_JOINT_STEREO,
-        .min_bitpool = 2,
-        .max_bitpool = 53 // default or can be changed
+        .sample_freq  = ESP_A2D_SBC_FREQ_44K,
+        .block_len    = ESP_A2D_SBC_BLOCK_LEN_16,
+        .num_subbands = ESP_A2D_SBC_SUBBAND_8,
+        .alloc_method = ESP_A2D_SBC_ALLOC_METHOD_LOUDNESS,
+        .channel_mode = ESP_A2D_SBC_CHANNEL_MODE_JOINT_STEREO,
+        .min_bitpool  = 2,
+        .max_bitpool  = 53
     };
     esp_a2d_source_set_sbc_params(&sbc_config);
     */
-    // ----------------------
 
     // 7) Make device connectable/discoverable
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
 
     // ---------------------------------------------------
     // 8) Create background task
-    // Increase stack size a bit to handle heavier loads (option 2)
     _myTaskQueue = xQueueCreate(10, sizeof(my_bt_app_msg_t));
     if (xTaskCreatePinnedToCore(
             MyA2DPSimple::myTaskHandler,
             "myBtAppTask",
             8192, // bigger stack size for stability
             NULL,
-            configMAX_PRIORITIES - 3, // fairly high priority
+            configMAX_PRIORITIES - 3,
             &_myTaskHandle,
             0) != pdPASS)
     {
@@ -153,7 +147,6 @@ void MyA2DPSimple::end() {
 // Start scanning
 // -------------------------------------------------------
 void MyA2DPSimple::startScan() {
-    // (Option 5) do NOT scan if already connected
     if (!_initialized) {
         Serial.println("[MyA2DPSimple] Not initialized => no scan.");
         return;
@@ -163,7 +156,7 @@ void MyA2DPSimple::startScan() {
         return;
     }
     if (_connecting || _connected) {
-        Serial.println("[MyA2DPSimple] Not starting scan (already connecting or connected).");
+        Serial.println("[MyA2DPSimple] Not starting scan (already connecting/connected).");
         return;
     }
     _discovered.clear();
@@ -236,7 +229,7 @@ void MyA2DPSimple::handleGapEvent(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_par
         if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
             _scanning = false;
             Serial.println("[MyA2DPSimple] Discovery ended => connect to best device");
-            // List all
+            // List all discovered
             for (auto &dev : _discovered) {
                 Serial.printf("    -> '%s' (%s), RSSI=%d\n",
                               dev.name.c_str(), dev.address.c_str(), dev.rssi);
@@ -277,7 +270,7 @@ void MyA2DPSimple::connectToBest() {
     Serial.printf("[MyA2DPSimple] Attempting connect => '%s' (%s), RSSI=%d\n",
                   _bestDev.name.c_str(), _bestDev.address.c_str(), bestRssi);
 
-    // Convert address
+    // Convert address string to bytes
     uint8_t btAddr[6];
     if (sscanf(_bestDev.address.c_str(), "%x:%x:%x:%x:%x:%x",
                &btAddr[0], &btAddr[1], &btAddr[2],
@@ -287,7 +280,7 @@ void MyA2DPSimple::connectToBest() {
         _connecting = true;
         esp_err_t err = esp_a2d_source_connect(remoteBdAddr);
         if (err == ESP_OK) {
-            Serial.printf("[MyA2DPSimple] Connect request => OK\n");
+            Serial.println("[MyA2DPSimple] Connect request => OK");
         } else {
             Serial.printf("[MyA2DPSimple] Connect request => FAILED (0x%x)\n", err);
             _connecting = false;
@@ -312,7 +305,7 @@ void MyA2DPSimple::handleA2DPEvent(esp_a2d_cb_event_t event, esp_a2d_cb_param_t 
             _connected  = true;
             Serial.println("[MyA2DPSimple] A2DP connected => streaming can start");
 
-            // Force the speaker to begin playing (it has no Play button)
+            // Force the speaker to begin playing
             esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY);
             esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
 
@@ -320,8 +313,7 @@ void MyA2DPSimple::handleA2DPEvent(esp_a2d_cb_event_t event, esp_a2d_cb_param_t 
             _connecting = false;
             _connected  = false;
             Serial.println("[MyA2DPSimple] A2DP disconnected => maybe re-scan");
-            // If you want to automatically reconnect, do so here:
-            startScan();
+            startScan(); // auto re-scan if you wish
         }
         break;
     }
@@ -335,7 +327,7 @@ void MyA2DPSimple::handleA2DPEvent(esp_a2d_cb_event_t event, esp_a2d_cb_param_t 
         break;
     }
     default:
-        // Unhandled
+        // Unhandled events
         break;
     }
 }
@@ -367,7 +359,9 @@ void MyA2DPSimple::myTaskHandler(void *arg) {
             default:
                 break;
             }
-            if (msg.param) free(msg.param);
+            if (msg.param) {
+                free(msg.param);
+            }
         }
     }
     vTaskDelete(NULL);
@@ -407,4 +401,15 @@ bool MyA2DPSimple::myWorkDispatch(my_bt_app_cb_t p_cback,
         }
     }
     return false;
+}
+
+// -------------------------------------------------------
+// Simple helper methods for main.cpp
+// -------------------------------------------------------
+bool MyA2DPSimple::isConnected() const {
+    return _connected;
+}
+
+bool MyA2DPSimple::isScanning() const {
+    return _scanning;
 }
