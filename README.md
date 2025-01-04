@@ -39,7 +39,7 @@ This ESP32-based project detects a specific beep frequency and then plays an aud
 4. **Upload the SPIFFS Filesystem Image**  
    The audio file resides in SPIFFS (SPI Flash File System) on the ESP32. To upload it, run:
    ```bash
-   esptool.py --port /dev/cu.usbserial-0001 erase_flash
+   esptool.py --port /dev/tty.wchusbserial110 erase_flash
    platformio run --target uploadfs
    ```
 
