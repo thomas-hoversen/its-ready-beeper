@@ -28,7 +28,14 @@ This ESP32-based project detects a specific beep frequency and then plays an aud
 
    Ensure the file is named `audio1.wav` unless you update the code references.
 
-3. **Build and Upload the Firmware**  
+3. **Discover the ESP32 Port**
+   Search for the port with the following command:
+```bash
+ls /dev/{tty,cu}.*
+```
+Then update the variables upload_port and monitor_port in the platformio.ini file.
+
+4. **Build and Upload the Firmware**  
    Using PlatformIO, run the following command to compile and upload the code to your ESP32:
    ```bash
    platformio run --target upload
@@ -36,16 +43,16 @@ This ESP32-based project detects a specific beep frequency and then plays an aud
 
    This will build and flash the main application onto your ESP32.
 
-4. **Upload the SPIFFS Filesystem Image**  
+5. **Upload the SPIFFS Filesystem Image**  
    The audio file resides in SPIFFS (SPI Flash File System) on the ESP32. To upload it, run:
    ```bash
-   esptool.py --port /dev/tty.wchusbserial110 erase_flash
+   esptool.py --port /dev/tty.wchusbserial3110 erase_flash
    platformio run --target uploadfs
    ```
 
    Ensure the `esp32fs.jar` tool is correctly installed and configured to enable this step.
 
-5. **Monitor the Serial Output**  
+6. **Monitor the Serial Output**  
    After uploading, connect to the serial monitor to view the output logs:
    ```bash
    platformio device monitor
@@ -57,7 +64,7 @@ This ESP32-based project detects a specific beep frequency and then plays an aud
    - Bluetooth connects to the speaker.
    - The beep detection and audio playback events occur as expected.
 
-6. **Running Unit Tests**  
+7. **Running Unit Tests**  
    You can run unit tests to verify the functionality of individual components. Use the following command:
    ```bash
    platformio test

@@ -26,8 +26,8 @@ static MyA2DPSimple a2dpSimple;
 // ---------------------------------------------------------------------------
 // LED / BUTTON PINS
 // ---------------------------------------------------------------------------
-#define LED_BLUE      16
-#define LED_ORANGE    17
+#define LED_BLUE      17
+#define LED_ORANGE    16
 #define BUTTON_PIN    25
 
 // Flag for WAV playback
@@ -53,7 +53,7 @@ static const int   I2S_DMA_BUF_LEN        = 128;
 #define FREQUENCY_MIN               1200
 #define FREQUENCY_MAX               9000
 static float BIN_AMPLITUDE_THRESHOLD      = 10;
-static float AMPLITUDE_THRESHOLD          = 3000;
+static float AMPLITUDE_THRESHOLD          = 0;
 static const int   I2S_READ_CHUNK         = 64;
 static const int   MIC_PROXIMITY_THRESHOLD= 100;
 static const int   MULTI_WINDOW_CONFIDENCE= 4;
