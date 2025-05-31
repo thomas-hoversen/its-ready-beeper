@@ -38,9 +38,62 @@
 *.d
 *.o
 *.log
+
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# PlatformIO
 .pio
-.vscode
+.pioenvs
+.piolibdeps
+.clang_complete
+.gcc-flags.json
+
+# ESP-IDF build artifacts
+build/
+build_*/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+
+# idf-ci build run output
+build_summary_*.xml
+app_info_*.txt
+size_info_*.txt
+
+# pytest-embedded log folder
+pytest_embedded_log/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# IDE files
+.vscode/
+*.code-workspace
 lib
 tools
-*.code-workspace
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Backup files
+*.bak
+*.backup

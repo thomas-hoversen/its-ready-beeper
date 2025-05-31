@@ -1,79 +1,125 @@
-# its-ready-beeper
+# ITS-Ready Beeper - ESP32 Audio Detection System
 
-This ESP32-based project detects a specific beep frequency and then plays an audio file (e.g., a notification sound) over a Bluetooth-connected speaker. The code utilizes FFT-based audio processing and can be easily managed with the PlatformIO ecosystem.
+A real-time audio frequency detection system built for ESP32 that automatically plays notification sounds via Bluetooth when specific beep frequencies are detected. This project demonstrates embedded systems programming, digital signal processing, and wireless audio streaming capabilities.
 
-## Requirements
+## 🔧 Technical Overview
 
-- **PlatformIO**: This project assumes you are using PlatformIO (either via the VSCode extension or the PlatformIO CLI).
-- **ESP32 Development Board**: A board such as the ESP32-DevKitC.
-- **Bluetooth Speaker**: A speaker or headset to test audio playback.
-- **Audio File (WAV)**: A `.wav` file to be played when a beep is detected.
-- **ESP32FS Tool**: Used to upload the SPIFFS filesystem image. You can download `esp32fs.jar` from the [ESP32 PlatformIO File System Uploader repository](https://github.com/me-no-dev/arduino-esp32fs-plugin). Follow the instructions to integrate it into your PlatformIO environment.
+- **Microcontroller**: ESP32 (ESP32-DevKitC)
+- **Framework**: Arduino/ESP-IDF with PlatformIO
+- **Key Features**:
+  - Real-time FFT-based frequency analysis (1200-9000 Hz range)
+  - Bluetooth A2DP audio streaming
+  - SPIFFS filesystem for audio storage
+  - Multi-window beep detection with confidence thresholds
+  - LED status indicators and button controls
+  - Watchdog timer for system reliability
 
-## Setup Instructions
+## 📋 Hardware Requirements
 
-1. **Clone or Download the Project**  
-   Retrieve this repository and open it in VSCode with the PlatformIO extension installed, or navigate to the project directory using the PlatformIO CLI.
+- ESP32 development board
+- I2S microphone (pins: SCK=14, WS=15, SD=34)
+- Bluetooth speaker/headphones
+- LEDs (Blue: pin 17, Orange: pin 16)
+- Push button (pin 25)
 
-2. **Place Your Audio File**  
-   Place your `.wav` file inside the `data` directory of the project. For example:
-   ```bash
-   its-ready-beeper/
-     ├─ src/
-     ├─ data/
-     │   └─ audio1.wav
-     ├─ platformio.ini
-     └─ ...
-   ```
+## 🚀 Development Setup
 
-   Ensure the file is named `audio1.wav` unless you update the code references.
+### Prerequisites
+- [PlatformIO](https://platformio.org/) installed
+- ESP32 drivers for your operating system
 
-3. **Discover the ESP32 Port**
-   Search for the port with the following command:
+### 1. Port Discovery
+Find your ESP32 port:
 ```bash
+# macOS/Linux
 ls /dev/{tty,cu}.*
+
+# Windows
+mode
 ```
-Then update the variables upload_port and monitor_port in the platformio.ini file.
+Update `upload_port` and `monitor_port` in `platformio.ini` accordingly.
 
-4. **Build and Upload the Firmware**  
-   Using PlatformIO, run the following command to compile and upload the code to your ESP32:
-   ```bash
-   platformio run --target upload
-   ```
+### 2. Build & Upload Firmware
+```bash
+# Build the project
+pio run
 
-   This will build and flash the main application onto your ESP32.
+# Upload firmware to ESP32
+pio run --target upload
+```
 
-5. **Upload the SPIFFS Filesystem Image**  
-   The audio file resides in SPIFFS (SPI Flash File System) on the ESP32. To upload it, run:
-   ```bash
-   esptool.py --port /dev/tty.wchusbserial3110 erase_flash
-   platformio run --target uploadfs
-   ```
+### 3. Upload Audio Files (SPIFFS)
+The system uses SPIFFS to store audio files. Upload the filesystem:
+```bash
+# Upload SPIFFS data (audio1.wav)
+pio run --target uploadfs
+```
 
-   Ensure the `esp32fs.jar` tool is correctly installed and configured to enable this step.
+### 4. Monitor Serial Output
+```bash
+# Start serial monitor
+pio device monitor
 
-6. **Monitor the Serial Output**  
-   After uploading, connect to the serial monitor to view the output logs:
-   ```bash
-   platformio device monitor
-   ```
-   The default baud rate is typically `115200` (adjust as needed).
+# Or with specific baud rate
+pio device monitor --baud 115200
+```
 
-   The logs will show whether:
-   - SPIFFS initialized correctly and `audio1.wav` is available.
-   - Bluetooth connects to the speaker.
-   - The beep detection and audio playback events occur as expected.
+## 📁 Project Structure
 
-7. **Running Unit Tests**  
-   You can run unit tests to verify the functionality of individual components. Use the following command:
-   ```bash
-   platformio test
-   ```
-   This will execute the tests defined in the `test/` directory on the development board.
+```
+its-ready-beeper/
+├── src/
+│   ├── main.cpp              # Main application logic
+│   ├── MyA2DPSimple.*        # Bluetooth A2DP implementation
+│   ├── BeepDetector.*        # FFT-based frequency detection
+│   └── BeepHistory.*         # Detection confidence tracking
+├── data/
+│   └── audio1.wav            # Notification audio file
+├── platformio.ini            # Build configuration
+└── partitions.csv            # ESP32 memory layout
+```
 
-## Notes
+## ⚙️ Configuration
 
-- **Adjusting Frequency Thresholds**: If your beep frequency differs, you may need to adjust `FREQUENCY_MIN`, `FREQUENCY_MAX`, and amplitude thresholds in the code.
-- **Customizing the Audio File**: Rename or change `audio1.wav` references in the code if you prefer a different filename or multiple audio files.
-- **Partitions Table**: The `partitions.csv` file defines the memory layout of the ESP32, specifying regions for code, SPIFFS, and other data. Modify this file if you need to adjust the partitioning for your project.
-- **Troubleshooting**: If the board does not appear on a serial port, check your USB cable and connection. If SPIFFS upload or code upload fails, ensure that your PlatformIO and ESP32 environment are set up correctly in `platformio.ini`.
+Key parameters in `main.cpp`:
+```cpp
+#define FREQUENCY_MIN           1200    // Detection range start
+#define FREQUENCY_MAX           9000    // Detection range end
+#define MULTI_WINDOW_CONFIDENCE 4       // Confidence threshold
+#define THRESHOLD_COUNT         3       // Required detections
+```
+
+## 🔍 System Behavior
+
+1. **Startup**: Initializes I2S, SPIFFS, and Bluetooth
+2. **Detection**: Continuously analyzes audio via FFT
+3. **Filtering**: Multi-window confidence system prevents false positives
+4. **Notification**: Plays audio file when threshold is reached
+5. **LED Feedback**: Visual status indicators for connection and playback states
+
+## 📊 Performance Features
+
+- **Real-time Processing**: 16kHz sampling with 512-point FFT
+- **Power Optimization**: `-Os` compilation flags and efficient memory usage
+- **Reliability**: Watchdog timer and error handling
+- **Scalability**: Modular design for easy feature expansion
+
+## 🛠️ Development Commands
+
+```bash
+# Clean build
+pio run --target clean
+
+# Erase flash completely
+pio run --target erase
+
+# Upload with verbose output
+pio run --target upload --verbose
+
+# Build for different environments
+pio run -e esp32dev
+```
+
+---
+
+*This project showcases embedded systems development, real-time signal processing, and IoT connectivity using modern C++ and ESP32 capabilities.*
